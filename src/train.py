@@ -4,11 +4,6 @@ import tensorflow as tf
 from model import Model
 import sys
 from pathlib import Path
-import psutil
-import objgraph
-from pympler import asizeof
-import os
-import gc
 
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root))
@@ -31,41 +26,6 @@ epochs = config['epochs']
 batch_size = config['batch_size']
 train_ratio = config['train_ratio']
 val_ratio = config['val_ratio']
-
-def log_memory(epoch):
-    print(f"\n=== Memory Usage at End of Epoch {epoch+1} ===")
-    
-    # System RAM
-    mem = psutil.virtual_memory()
-    process = psutil.Process(os.getpid())
-    print(f"System RAM:")
-    print(f"  Tổng RAM: {mem.total / (1024 ** 3):.2f} GB")
-    print(f"  RAM đã sử dụng: {mem.used / (1024 ** 3):.2f} GB")
-    print(f"  Phần trăm RAM đã sử dụng: {mem.percent}%")
-    print(f"  RAM còn trống: {mem.available / (1024 ** 3):.2f} GB")
-    print(f"  RAM của tiến trình Python: {process.memory_info().rss / (1024 ** 3):.2f} GB")
-
-    # Kích thước các đối tượng lớn
-    print(f"\nKích thước các đối tượng lớn trong RAM:")
-    print(f"  X_train: {asizeof.asizeof(X_train) / (1024 ** 2):.2f} MB")
-    print(f"  Y_train: {asizeof.asizeof(Y_train) / (1024 ** 2):.2f} MB")
-    print(f"  lengths_train: {asizeof.asizeof(lengths_train) / (1024 ** 2):.2f} MB")
-    print(f"  X_val: {asizeof.asizeof(X_val) / (1024 ** 2):.2f} MB")
-    print(f"  Y_val: {asizeof.asizeof(Y_val) / (1024 ** 2):.2f} MB")
-    print(f"  lengths_val: {asizeof.asizeof(lengths_val) / (1024 ** 2):.2f} MB")
-    print(f"  model: {asizeof.asizeof(model) / (1024 ** 2):.2f} MB")
-
-    # GPU RAM (VRAM)
-    try:
-        gpu_mem = tf.config.experimental.get_memory_info('GPU:0')
-        print(f"\nGPU VRAM:")
-        print(f"  VRAM hiện tại: {gpu_mem['current'] / (1024 ** 3):.2f} GB")
-        print(f"  VRAM đỉnh: {gpu_mem['peak'] / (1024 ** 3):.2f} GB")
-    except RuntimeError:
-        print(f"\nGPU VRAM: Không tìm thấy GPU hoặc không hỗ trợ kiểm tra bộ nhớ.")
-
-    # Thu thập rác để giảm bộ nhớ
-    gc.collect()
 
 def create_dynamic_batch(X, Y, lengths, batch_indices):
     batch_X = [X[i] for i in batch_indices]
@@ -137,51 +97,39 @@ def evaluate_model(model, X_val, Y_val, lengths_val, batch_size):
 X_train, Y_train, lengths_train, X_val, Y_val, lengths_val, X_test, Y_test, lengths_test = split_train_val_test(X, Y, lengths, train_ratio, val_ratio)
 
 class CustomLRScheduler:
-    def __init__(self, model, X_val, Y_val, lengths_val, batch_size, patience=3, min_lr=0.00001, warmup_epochs=5, max_lr=0.01, T_max=10):
+    def __init__(self, model, X_val, Y_val, lengths_val, batch_size, patience=3, min_lr=1e-6):
         self.model = model
         self.X_val = X_val
         self.Y_val = Y_val
         self.lengths_val = lengths_val
         self.batch_size = batch_size
         self.patience = patience
-        self.factor = factor
         self.min_lr = min_lr
-        self.warmup_epochs = warmup_epochs
-        self.max_lr = max_lr
-        self.T_max = T_max
         self.best_val_loss = float('inf')
         self.wait = 0
-        self.current_lr = min_lr
-    
-    def warmup_lr(self, epoch):
-        return self.min_lr + (self.max_lr - self.min_lr) * epoch / self.warmup_epochs
-    
-    def cosine_annealing(self, epoch):
-        return self.min_lr + 0.5 * (self.max_lr - self.min_lr) * (1 + np.cos(np.pi * (epoch - self.warmup_epochs) / self.T_max))
-    
+        self.current_lr = 0.0005
+        
     def on_epoch_end(self, epoch):
         val_loss = evaluate_model(self.model, self.X_val, self.Y_val, self.lengths_val, self.batch_size)
         
-        if epoch < self.warmup_epochs:
-            self.current_lr = self.warmup_lr(epoch)
+        if val_loss < self.best_val_loss:
+            self.best_val_loss = val_loss
+            self.wait = 0
         else:
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
-                self.wait = 0
-            else:
-                self.wait += 1
+            self.wait += 1
             
-            self.current_lr = self.cosine_annealing(epoch)
-            if self.wait >= self.patience:
+        if self.wait >= self.patience:
+            old_lr = self.current_lr
+            self.current_lr = max(self.current_lr * self.factor, self.min_lr)
+            if self.current_lr < old_lr:
+                print(f"║ Giảm learning rate từ {old_lr:.6f} xuống {self.current_lr:.6f} ║")
+                tf.keras.backend.set_value(self.model.optimizer.learning_rate, self.current_lr)
                 self.wait = 0
         
-        tf.keras.backend.set_value(self.model.optimizer.learning_rate, self.current_lr)
-        print(f"║ Epoch {epoch + 1}: Learning rate = {self.current_lr:.6f}, Val Loss = {val_loss:.4f} ║")
-
         return val_loss
 
 model = Model(vocab_size, d_model, num_heads, num_layers, ff_dim, max_seq_len, dropout)
-optimizer = tf.keras.optimizers.Adam(learning_rate=0.0)
+optimizer = tf.keras.optimizers.Adam(learning_rate=0.0005)
 model.compile(loss="sparse_categorical_crossentropy", optimizer=optimizer)
 
 lr_scheduler = CustomLRScheduler(model, X_val, Y_val, lengths_val, batch_size)
@@ -229,7 +177,6 @@ for epoch in range(epochs):
     current_lr = float(tf.keras.backend.get_value(model.optimizer.learning_rate))
     
     print(f"║ Epoch: {epoch+1:2d}/{epochs}, Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss:.4f}, LR: {current_lr:.4f} ║")
-    log_memory(epoch)
 
 print("╠═════════════════════════════════════════╣")
 print("║          ĐÁNH GIÁ TRÊN TEST SET         ║")

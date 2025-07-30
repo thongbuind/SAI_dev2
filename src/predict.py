@@ -52,7 +52,7 @@ def detokenize(tokens, infor=None):
             words.append(word)
     return " ".join(words)
 
-def new_generate_response(sentence, max_new_tokens=max_seq_len, top_k=3, temperature=1.0):
+def new_generate_response(sentence, max_new_tokens=max_seq_len, top_k=1, temperature=1.0):
     """
     Tạo phản hồi từ câu đầu vào:
         current_sequence = [BOS] + req
