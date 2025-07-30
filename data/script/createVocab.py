@@ -4,35 +4,21 @@ from vncorenlp import VnCoreNLP
 import pandas as pd
 import time
 
-# Khởi tạo VnCoreNLP
-VNCORENLP_PATH = "/Users/thongbui.nd/vncorenlp/VnCoreNLP/VnCoreNLP-1.1.1.jar"
-
-def init_annotator():
-    return VnCoreNLP(VNCORENLP_PATH, annotators="wseg", max_heap_size='-Xmx2g')
-
-annotator = init_annotator()
-
-# Đường dẫn thư mục
 current_file = Path(__file__).resolve()
 data_dir = current_file.parent.parent
 raw_dir = data_dir / "raw"
 
-# ----------- ĐỌC FILE .json (file1 mới) -----------
+VNCORENLP_PATH = "/Users/thongbui.nd/vncorenlp/VnCoreNLP/VnCoreNLP-1.1.1.jar"
+annotator = VnCoreNLP(VNCORENLP_PATH, annotators="wseg", max_heap_size='-Xmx2g')
+
+# ----------- ĐỌC FILE pre_train.json -----------
 file1_path = raw_dir / "pre_train.json"
-texts1 = []
+texts = []
 with open(file1_path, "r", encoding="utf-8") as f:
     for line in f:
         line = line.strip()
-        if line:  # Bỏ qua dòng trống
-            texts1.append(line)
-
-# ----------- ĐỌC FILE .csv (file2 cũ) -----------
-file2_path = raw_dir / "fine_tune.csv"
-file2 = pd.read_csv(file2_path, encoding="utf-8")
-texts2 = file2.astype(str).apply(lambda col: col.dropna().tolist()).values.flatten().tolist()
-
-# ----------- GHÉP TẤT CẢ TEXTS -----------
-texts = texts1 + texts2
+        if line:
+            texts.append(line)
 
 # ----------- TẠO VOCABULARY -----------
 vocab = set()
@@ -51,7 +37,7 @@ for i in range(0, len(texts), batch_size):
                 result = annotator.tokenize(sentence)
                 for word_list in result:
                     vocab.update(word_list)
-                break  # Thành công, thoát khỏi vòng lặp retry
+                break
             except Exception as e:
                 retry_count += 1
                 print(f"Lỗi khi tokenize (lần thử {retry_count}): {e}")
@@ -62,12 +48,11 @@ for i in range(0, len(texts), batch_size):
                     except:
                         pass
                     time.sleep(2)
-                    annotator = init_annotator()
+                    annotator = VnCoreNLP(VNCORENLP_PATH, annotators="wseg", max_heap_size='-Xmx2g')
                     time.sleep(1)
                 else:
                     print(f"Bỏ qua câu: {sentence[:50]}...")
     
-    # Thêm delay giữa các batch
     time.sleep(0.1)
 
 special_tokens = ["[PAD]", "[CLS]", "[SEP]", "[MASK]", "[UNK]", "[BOS]", "[EOS]"]

@@ -7,5 +7,7 @@
     "ff_dim": 512,
     "dropout": 0.2,
     "epochs": 50,
-    "batch_size": 64
+    "batch_size": 128,
+    "train_ratio": 0.8,
+    "val_ratio": 0.1
 }

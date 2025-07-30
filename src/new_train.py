@@ -67,22 +67,6 @@ def log_memory(epoch):
     # Thu thập rác để giảm bộ nhớ
     gc.collect()
 
-def create_dynamic_batch(X, Y, lengths, batch_indices):
-    batch_X = [X[i] for i in batch_indices]
-    batch_Y = [Y[i] for i in batch_indices]
-    batch_lengths = [lengths[i] for i in batch_indices]
-    
-    max_len_in_batch = max(batch_lengths)
-    
-    batch_X_padded = tf.keras.preprocessing.sequence.pad_sequences(
-        batch_X, maxlen=max_len_in_batch, padding='post'
-    )
-    batch_Y_padded = tf.keras.preprocessing.sequence.pad_sequences(
-        batch_Y, maxlen=max_len_in_batch, padding='post'
-    )
-    
-    return batch_X_padded, batch_Y_padded, batch_lengths
-
 def split_train_val_test(X, Y, lengths, train_ratio, val_ratio):
     """Chia dữ liệu thành train/validation/test set"""
     total_samples = len(X)
@@ -109,42 +93,75 @@ def split_train_val_test(X, Y, lengths, train_ratio, val_ratio):
     
     return X_train, Y_train, lengths_train, X_val, Y_val, lengths_val, X_test, Y_test, lengths_test
 
-def evaluate_model(model, X_val, Y_val, lengths_val, batch_size):
-    num_val_samples = len(X_val)
-    num_val_batches = (num_val_samples + batch_size - 1) // batch_size
-    total_loss = 0.0
-    total_batches = 0
+def create_tf_dataset(X, Y, lengths, batch_size, shuffle=True, prefetch_size=tf.data.AUTOTUNE):
+    """
+    Tạo tf.data.Dataset với dynamic padding và optimizations
+    """
+    def generator():
+        indices = list(range(len(X)))
+        if shuffle:
+            np.random.shuffle(indices)
+        for i in indices:
+            yield X[i], Y[i], lengths[i]
     
-    for i in range(num_val_batches):
-        start_idx = i * batch_size
-        end_idx = min(start_idx + batch_size, num_val_samples)
-        batch_indices = list(range(start_idx, end_idx))
-        
-        batch_X, batch_Y, batch_lengths = create_dynamic_batch(X_val, Y_val, lengths_val, batch_indices)
-        
-        if batch_X.shape[0] < batch_size:
-            pad_size = batch_size - batch_X.shape[0]
-            current_seq_len = batch_X.shape[1]
-            batch_X = np.pad(batch_X, [(0, pad_size), (0, 0)], mode='constant', constant_values=0)
-            batch_Y = np.pad(batch_Y, [(0, pad_size), (0, 0)], mode='constant', constant_values=0)
-        
-        loss = model.test_on_batch(batch_X, batch_Y)
-        total_loss += loss
-        total_batches += 1
+    # Tạo dataset từ generator
+    dataset = tf.data.Dataset.from_generator(
+        generator,
+        output_signature=(
+            tf.TensorSpec(shape=(None,), dtype=tf.int32),
+            tf.TensorSpec(shape=(None,), dtype=tf.int32),
+            tf.TensorSpec(shape=(), dtype=tf.int32)
+        )
+    )
     
-    return total_loss / total_batches if total_batches > 0 else float('inf')
+    # Group sequences by similar lengths để tối ưu padding
+    def length_bucket_key(x, y, length):
+        # Chia sequences thành các bucket theo độ dài
+        bucket_width = 50
+        return length // bucket_width
+    
+    def reduce_func(key, windowed_data):
+        return windowed_data.batch(batch_size)
+    
+    # Bucket by sequence length và batch
+    dataset = dataset.group_by_window(
+        key_func=length_bucket_key,
+        reduce_func=reduce_func,
+        window_size=batch_size
+    )
+    
+    # Padding function cho batch
+    def pad_batch(batch_x, batch_y, batch_lengths):
+        # Pad sequences trong batch đến max length của batch đó
+        padded_x = tf.keras.preprocessing.sequence.pad_sequences(
+            batch_x.numpy(), padding='post', dtype='int32'
+        )
+        padded_y = tf.keras.preprocessing.sequence.pad_sequences(
+            batch_y.numpy(), padding='post', dtype='int32'
+        )
+        return tf.constant(padded_x), tf.constant(padded_y)
+    
+    # Apply padding với py_function
+    dataset = dataset.map(
+        lambda x, y, lengths: tf.py_function(
+            pad_batch, [x, y, lengths], [tf.int32, tf.int32]
+        ),
+        num_parallel_calls=tf.data.AUTOTUNE
+    )
+    
+    # Optimizations
+    if prefetch_size:
+        dataset = dataset.prefetch(prefetch_size)
+    
+    return dataset
 
-X_train, Y_train, lengths_train, X_val, Y_val, lengths_val, X_test, Y_test, lengths_test = split_train_val_test(X, Y, lengths, train_ratio, val_ratio)
-
-class CustomLRScheduler:
-    def __init__(self, model, X_val, Y_val, lengths_val, batch_size, patience=3, min_lr=0.00001, warmup_epochs=5, max_lr=0.01, T_max=10):
-        self.model = model
-        self.X_val = X_val
-        self.Y_val = Y_val
-        self.lengths_val = lengths_val
-        self.batch_size = batch_size
+class CustomLRScheduler(tf.keras.callbacks.Callback):
+    """
+    Custom Learning Rate Scheduler như callback
+    """
+    def __init__(self, patience=3, min_lr=0.00001, warmup_epochs=5, max_lr=0.01, T_max=10):
+        super().__init__()
         self.patience = patience
-        self.factor = factor
         self.min_lr = min_lr
         self.warmup_epochs = warmup_epochs
         self.max_lr = max_lr
@@ -159,8 +176,8 @@ class CustomLRScheduler:
     def cosine_annealing(self, epoch):
         return self.min_lr + 0.5 * (self.max_lr - self.min_lr) * (1 + np.cos(np.pi * (epoch - self.warmup_epochs) / self.T_max))
     
-    def on_epoch_end(self, epoch):
-        val_loss = evaluate_model(self.model, self.X_val, self.Y_val, self.lengths_val, self.batch_size)
+    def on_epoch_end(self, epoch, logs=None):
+        val_loss = logs.get('val_loss', float('inf'))
         
         if epoch < self.warmup_epochs:
             self.current_lr = self.warmup_lr(epoch)
@@ -175,69 +192,73 @@ class CustomLRScheduler:
             if self.wait >= self.patience:
                 self.wait = 0
         
-        tf.keras.backend.set_value(self.model.optimizer.learning_rate, self.current_lr)
+        self.model.optimizer.learning_rate.assign(self.current_lr)
         print(f"║ Epoch {epoch + 1}: Learning rate = {self.current_lr:.6f}, Val Loss = {val_loss:.4f} ║")
 
-        return val_loss
+# Split data
+X_train, Y_train, lengths_train, X_val, Y_val, lengths_val, X_test, Y_test, lengths_test = split_train_val_test(X, Y, lengths, train_ratio, val_ratio)
 
+# Create model
 model = Model(vocab_size, d_model, num_heads, num_layers, ff_dim, max_seq_len, dropout)
-optimizer = tf.keras.optimizers.Adam(learning_rate=0.0)
-model.compile(loss="sparse_categorical_crossentropy", optimizer=optimizer)
+optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
+model.compile(
+    loss="sparse_categorical_crossentropy", 
+    optimizer=optimizer,
+    metrics=['accuracy']
+)
 
-lr_scheduler = CustomLRScheduler(model, X_val, Y_val, lengths_val, batch_size)
+print("Tạo training dataset...")
+train_dataset = create_simple_tf_dataset(X_train, Y_train, batch_size, max_seq_len, shuffle=True)
 
-num_train_samples = len(X_train)
-num_train_batches = (num_train_samples + batch_size - 1) // batch_size
+print("Tạo validation dataset...")
+val_dataset = create_simple_tf_dataset(X_val, Y_val, batch_size, max_seq_len, shuffle=False)
+
+print("Tạo test dataset...")
+test_dataset = create_simple_tf_dataset(X_test, Y_test, batch_size, max_seq_len, shuffle=False)
+
+callbacks = [
+    CustomLRScheduler(),
+    tf.keras.callbacks.EarlyStopping(
+        monitor='val_loss',
+        patience=10,
+        restore_best_weights=True,
+        verbose=1
+    ),
+    tf.keras.callbacks.ModelCheckpoint(
+        filepath=str(project_root / "model" / "best_model.keras"),
+        monitor='val_loss',
+        save_best_only=True,
+        verbose=1
+    ),
+    tf.keras.callbacks.LambdaCallback(
+        on_epoch_end=lambda epoch, logs: log_memory(epoch)
+    )
+]
 
 print("╔═════════════════════════════════════════╗")
 print("║            BẮT ĐẦU PRE-TRAIN            ║")
 print("╠═════════════════════════════════════════╣")
 
-best_val_loss = float('inf')
-patience_counter = 0
-
-for epoch in range(epochs):
-    # SHUFFLE TRAIN SET trước mỗi epoch
-    train_indices = np.random.permutation(len(X_train))
-    X_train_shuffled = [X_train[i] for i in train_indices]
-    Y_train_shuffled = [Y_train[i] for i in train_indices]
-    lengths_train_shuffled = [lengths_train[i] for i in train_indices]
-    
-    epoch_train_loss = 0.0
-    num_train_samples = len(X_train_shuffled)
-    num_train_batches = (num_train_samples + batch_size - 1) // batch_size
-    
-    for i in range(num_train_batches):
-        start_idx = i * batch_size
-        end_idx = min(start_idx + batch_size, num_train_samples)
-        batch_indices = list(range(start_idx, end_idx))
-        
-        batch_X, batch_Y, batch_lengths = create_dynamic_batch(X_train_shuffled, Y_train_shuffled, lengths_train_shuffled, batch_indices)
-        
-        if batch_X.shape[0] < batch_size:
-            pad_size = batch_size - batch_X.shape[0]
-            current_seq_len = batch_X.shape[1]
-            batch_X = np.pad(batch_X, [(0, pad_size), (0, 0)], mode='constant', constant_values=0)
-            batch_Y = np.pad(batch_Y, [(0, pad_size), (0, 0)], mode='constant', constant_values=0)
-        
-        loss = model.train_on_batch(batch_X, batch_Y)
-        epoch_train_loss += loss
-    
-    avg_train_loss = epoch_train_loss / num_train_batches
-    
-    val_loss = lr_scheduler.on_epoch_end(epoch)
-    current_lr = float(tf.keras.backend.get_value(model.optimizer.learning_rate))
-    
-    print(f"║ Epoch: {epoch+1:2d}/{epochs}, Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss:.4f}, LR: {current_lr:.4f} ║")
-    log_memory(epoch)
+model.fit(
+    train_dataset,
+    validation_data=val_dataset,
+    epochs=epochs,
+    callbacks=callbacks,
+    verbose=1
+)
 
 print("╠═════════════════════════════════════════╣")
 print("║          ĐÁNH GIÁ TRÊN TEST SET         ║")
 print("╠═════════════════════════════════════════╣")
 
-test_loss = evaluate_model(model, X_test, Y_test, lengths_test, batch_size)
+# Evaluate model
+test_results = model.evaluate(test_dataset, verbose=1)
+test_loss = test_results[0]
+test_accuracy = test_results[1] if len(test_results) > 1 else None
 
-print(f"║ Test Loss: {test_loss:.4f}                       ║")
+print(f"║ Test Loss: {test_loss:.4f}")
+if test_accuracy:
+    print(f"║ Test Accuracy: {test_accuracy:.4f}")
 print("╚═════════════════════════════════════════╝")
 
 # Lưu model cuối cùng

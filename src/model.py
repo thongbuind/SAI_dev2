@@ -2,7 +2,7 @@ import tensorflow as tf
 from keras import layers, models
 
 class RotaryPositionalEmbedding(layers.Layer):
-    def __init__(self, d_model, max_seq_len=128, **kwargs):
+    def __init__(self, d_model, max_seq_len, **kwargs):
         super().__init__(**kwargs)
         
         if d_model % 2 != 0:
@@ -57,7 +57,7 @@ class RotaryPositionalEmbedding(layers.Layer):
         return rotated_x
 
 class MultiHeadAttention(layers.Layer):
-    def __init__(self, d_model, num_heads, max_seq_len=128, dropout_rate=0.1, **kwargs):
+    def __init__(self, d_model, num_heads, max_seq_len, dropout_rate, **kwargs):
         super().__init__(**kwargs)
         
         if d_model % num_heads != 0:
@@ -131,13 +131,13 @@ class MultiHeadAttention(layers.Layer):
         return config
 
 class DecoderBlock(layers.Layer):
-    def __init__(self, d_model, num_heads, ff_dim, dropout, max_seq_len=128, **kwargs):
+    def __init__(self, d_model, num_heads, ff_dim, max_seq_len, dropout, **kwargs):
         super().__init__(**kwargs)
         self.d_model = d_model
         self.num_heads = num_heads
         self.ff_dim = ff_dim
-        self.dropout = dropout
         self.max_seq_len = max_seq_len
+        self.dropout = dropout
 
         self.mha = MultiHeadAttention(d_model, num_heads, max_seq_len, dropout)
         
@@ -165,26 +165,26 @@ class DecoderBlock(layers.Layer):
             "d_model": self.d_model,
             "num_heads": self.num_heads,
             "ff_dim": self.ff_dim,
-            "dropout": self.dropout,
-            "max_seq_len": self.max_seq_len
+            "max_seq_len": self.max_seq_len,
+            "dropout": self.dropout
         })
         return config
 
 class Model(models.Model):
-    def __init__(self, vocab_size, d_model, num_heads, num_layers, ff_dim, dropout, max_seq_len=128, **kwargs):
+    def __init__(self, vocab_size, d_model, num_heads, num_layers, ff_dim, max_seq_len, dropout, **kwargs):
         super().__init__(**kwargs)
         self.vocab_size = vocab_size
         self.d_model = d_model
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.ff_dim = ff_dim
-        self.dropout = dropout
         self.max_seq_len = max_seq_len
+        self.dropout = dropout
 
         self.token_embedding = layers.Embedding(input_dim=vocab_size, output_dim=d_model, mask_zero=True)
 
         self.decoder_blocks = [
-            DecoderBlock(d_model, num_heads, ff_dim, dropout, max_seq_len)
+            DecoderBlock(d_model, num_heads, ff_dim, max_seq_len, dropout)
             for _ in range(num_layers)
         ]
         self.dropout_layer = layers.Dropout(dropout)
@@ -207,7 +207,7 @@ class Model(models.Model):
             "num_heads": self.num_heads,
             "num_layers": self.num_layers,
             "ff_dim": self.ff_dim,
-            "dropout": self.dropout,
             "max_seq_len": self.max_seq_len,
+            "dropout": self.dropout,
         })
         return config

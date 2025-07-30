@@ -1,12 +1,9 @@
-import tensorflow as tf
 import numpy as np
 import json
 from vncorenlp import VnCoreNLP
-import csv
 from pathlib import Path
 import time
 
-# Lấy đường dẫn tuyệt đối đến file vocab.txt dựa trên vị trí file hiện tại
 current_file = Path(__file__).resolve()
 
 config_dir = current_file.parent.parent.parent / "config" / "config.json"
@@ -14,7 +11,6 @@ with open(config_dir, 'r') as f:
     config = json.load(f)
 max_seq_len = config['max_seq_len']
 
-# Đọc vocab
 vocab = {}
 vocab_path = current_file.parent.parent / "vocab.txt"
 with open(vocab_path, "r", encoding="utf-8") as f:
@@ -60,13 +56,7 @@ def prepare_data(pretrain_data, vocab, max_seq_len, batch_size=50):
     Chuẩn bị dữ liệu từ pretrain_data với định dạng: 
         inp = [BOS] + sequence
         tgt = sequence + [EOS]
-    
-    Args:
-        pretrain_data: List các câu tự do (ví dụ: ["Max Verstappen là tay đua F1", ...])
-        vocab: Dictionary ánh xạ từ sang ID
-        max_seq_len: Độ dài tối đa của chuỗi
-        batch_size: Kích thước batch để xử lý tokenization (mặc định 50)
-    
+
     Returns:
         X: Dữ liệu đầu vào (input IDs) - không padding
         Y: Dữ liệu mục tiêu (target IDs) - không padding
@@ -84,17 +74,15 @@ def prepare_data(pretrain_data, vocab, max_seq_len, batch_size=50):
             while retry_count < max_retries:
                 try:
                     tokens = tokenize(sentence)
-                    if len(tokens) < 2 or len(tokens) * 2 + 2 > max_seq_len:  # Kiểm tra độ dài để tránh vượt max_seq_len
+                    if len(tokens) < 2 or len(tokens) + 2 > max_seq_len:
                         break
-                    # Lặp lại chuỗi tokens
-                    sequence = tokens
-                    # Tạo đầu vào và mục tiêu
-                    inp = [vocab["[BOS]"]] + sequence
-                    tgt = sequence + [vocab["[EOS]"]]
+
+                    inp = [vocab["[BOS]"]] + tokens
+                    tgt = tokens + [vocab["[EOS]"]]
                     X.append(inp)
                     Y.append(tgt)
-                    lengths.append(len(inp))  # Lưu độ dài thực
-                    break  # Thành công, thoát khỏi vòng lặp retry
+                    lengths.append(len(inp))
+                    break
                 except Exception as e:
                     retry_count += 1
                     print(f"Lỗi khi tokenize (lần thử {retry_count}): {e}")
@@ -104,7 +92,6 @@ def prepare_data(pretrain_data, vocab, max_seq_len, batch_size=50):
                     else:
                         print(f"Bỏ qua câu: {sentence[:50]}...")
         
-        # Thêm delay giữa các batch
         time.sleep(0.1)
     return X, Y, lengths
 
