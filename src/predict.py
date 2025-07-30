@@ -52,11 +52,7 @@ def detokenize(tokens, infor=None):
             words.append(word)
     return " ".join(words)
 
-# ============================
-# Hàm Tạo Phản Hồi Cá Nhân Hóa
-# ============================
-
-def generate_response(sentence, max_new_tokens=32, infor=None):
+def old_generate_response(sentence, max_new_tokens=32, infor=None):
     """Tạo phản hồi dựa trên thông tin cá nhân - AUTOREGRESSIVE GENERATION"""
     req_tokens = tokenize(sentence)
     
@@ -99,19 +95,97 @@ def generate_response(sentence, max_new_tokens=32, infor=None):
 # Kiểm Tra Mô Hình
 # ================
 
+prompts = [
+    "bánh mì",
+    "bánh mì có nguồn gốc từ",
+    "việt nam",
+    "việt nam sở hữu",
+    "phở",
+    "buổi sáng người việt nam thường ăn",
+    "đám mây",
+    "Đinh Tiên Hoàng lên ngôi",
+    "lê thái tổ có miếu hiệu",
+    "công thức 1",
+    "sáng hôm ấy",
+    "sau khi ăn xong, chúng tôi đi",
+    "mặc dù",
+    "bởi vì trời mưa,"
+]
+
 print("\n=== Test pre-train ===")
-print("Req: bánh mì \nRes: ", generate_response("bánh mì"))
-print("Req: bánh mì có nguồn gốc từ \nRes: ", generate_response("bánh mì có nguồn gốc từ"))
-print("Req: việt nam \nRes: ", generate_response("việt nam"))
-print("Req: việt nam sở hữu \nRes: ", generate_response("việt nam sở hữu"))
-print("Req: phở \nRes: ", generate_response("phở"))
-print("Req: buổi sáng người việt nam thường ăn \nRes: ", generate_response("buổi sáng người việt nam thường ăn"))
-print("Req: đám mây \nRes: ", generate_response("đám mây"))
-print("Req: Đinh Tiên Hoàng lên ngôi \nRes: ", generate_response("Đinh Tiên Hoàng lên ngôi"))
-print("Req: lê thái tổ có miếu hiệu \nRes: ", generate_response("lê thái tổ có miếu hiệu"))
-print("Req: công thức 1 \nRes: ", generate_response("công thức 1"))
-print("Req: sáng hôm ấy \nRes: ", generate_response("ng hôm ấy"))
-print("Req: sau khi ăn xong, chúng tôi đi \nRes: ", generate_response("sau khi ăn xong, chúng tôi đi"))
-print("Req: mặc dù \nRes: ", generate_response("mặc dù"))
-print("Req: bởi vì trời mưa, \nRes: ", generate_response("bởi vì trời mưa,"))
+for req in prompts:
+    print(f"Req: {req} \nRes: {old_generate_response(req)}")
+
+def new_generate_response(sentence, max_new_tokens=max_seq_len, top_k=3, temperature=1.0, verbose=False):
+    """
+    Tạo phản hồi từ câu đầu vào.
+    current_sequence = [BOS] + req
+    sequence = loop(predict(current_sequence))
+    Nâng cấp:
+    - Tối ưu hoá Padding
+    - Đa dạng cơ chế lấy mẫu (sampling), sử dụng Top-k
+    - Thay vì chỉ sử dụng token cuối thì sử dụng cả đoạn từ đầu để dự đoán
+    """
+    req_tokens = tokenize(sentence)
+    current_sequence = [vocab["[BOS]"]] + req_tokens
+
+    padded_input = tf.keras.preprocessing.sequence.pad_sequences(
+        [current_sequence], maxlen=max_seq_len, padding='post', dtype='int32'
+    )
+
+    if verbose:
+        print(f"🔧 THÔNG SỐ SINH VĂN BẢN:")
+        print(f"   📝 Câu đầu vào: '{sentence}'")
+        print(f"   🎯 Max tokens: {max_new_tokens}")
+        print(f"   🔥 Temperature: {temperature}")
+        print(f"   🎲 Top-k: {top_k}")
+        print(f"   📊 Độ dài sequence ban đầu: {len(current_sequence)}")
+        print(f"\n{'='*60}")
+
+    for step in range(max_new_tokens):
+        preds = model(padded_input, training=False)
+        next_token_probs = preds[0, len(current_sequence) - 1, :].numpy()
+
+        # Áp dụng temperature
+        next_token_probs = np.exp(np.log(next_token_probs + 1e-10) / temperature)
+        next_token_probs /= np.sum(next_token_probs)
+
+        # Top-k sampling
+        top_k_indices = np.argsort(next_token_probs)[-top_k:]
+        top_k_probs = next_token_probs[top_k_indices] / np.sum(next_token_probs[top_k_indices])
+        next_token = np.random.choice(top_k_indices, p=top_k_probs)
+
+        # Hiển thị thông tin nếu verbose=True
+        if verbose:
+            selected_prob = next_token_probs[next_token]
+            loss = -np.log(selected_prob + 1e-10)
+            
+            print(f"\n🔄 BƯỚC {step + 1}:")
+            print(f"   📍 Token được chọn: ID {next_token}")
+            print(f"   📉 Loss: {loss:.4f}")
+            print(f"   🏆 TOP 3 ỨNG VIÊN:")
+            
+            # Hiển thị top 3 với loss
+            top_3_indices = np.argsort(next_token_probs)[-3:][::-1]
+            for i, idx in enumerate(top_3_indices):
+                prob = next_token_probs[idx]
+                token_loss = -np.log(prob + 1e-10)
+                is_selected = "✅" if idx == next_token else "  "
+                print(f"      {is_selected} #{i+1}: ID {idx} (p={prob:.4f}, loss={token_loss:.4f})")
+
+        if next_token in [vocab["[EOS]"], vocab["[PAD]"]]:
+            break
+
+        current_sequence.append(int(next_token))
+        padded_input[0, len(current_sequence) - 1] = next_token
+
+        if len(current_sequence) >= max_seq_len:
+            break
+    
+    return detokenize(current_sequence[1:])
+
+print("\n=== Test pre-train ===")
+for req in prompts:
+    print(f"Req: {req} \nRes: {new_generate_response(req)}")
+
 
