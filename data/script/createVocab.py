@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 from vncorenlp import VnCoreNLP
-import pandas as pd
 import time
 
 current_file = Path(__file__).resolve()

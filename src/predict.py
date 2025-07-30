@@ -52,7 +52,7 @@ def detokenize(tokens, infor=None):
             words.append(word)
     return " ".join(words)
 
-def new_generate_response(sentence, max_new_tokens=max_seq_len, top_k=1, temperature=1.0):
+def new_generate_response(sentence, max_new_tokens=max_seq_len, top_k=2, temperature=1.0):
     """
     Tạo phản hồi từ câu đầu vào:
         current_sequence = [BOS] + req
@@ -106,7 +106,7 @@ prompts = [
     "buổi sáng người việt nam thường ăn",
     "đám mây",
     "Đinh Tiên Hoàng lên ngôi",
-    "lê thái tổ có miếu hiệu",
+    "lê lợi có miếu hiệu",
     "công thức 1",
     "sáng hôm ấy",
     "sau khi ăn xong, chúng tôi đi",
