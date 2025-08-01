@@ -2,12 +2,12 @@
     "vocab_size": 13649,
     "max_seq_len": 128,
     "d_model": 128,
-    "num_heads": 8,
-    "num_layers": 6,
+    "num_heads": 4,
+    "num_layers": 3,
     "ff_dim": 512,
     "dropout": 0.2,
     "epochs": 10,
-    "batch_size": 32,
+    "batch_size": 128,
     "train_ratio": 0.8,
     "val_ratio": 0.1
 }
