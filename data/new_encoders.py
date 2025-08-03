@@ -1,4 +1,4 @@
-from tokenizers import Tokenizer, trainers, models, pre_tokenizers
+from tokenizers import Tokenizer, trainers, models
 from tokenizers.normalizers import NFD, Lowercase, StripAccents, Sequence
 from tokenizers.pre_tokenizers import Whitespace
 import json
@@ -51,7 +51,7 @@ for line in dataset:
     tokens = encoded.ids
     
     # Bỏ qua câu quá ngắn hoặc quá dài (giống logic VnCoreNLP)
-    if len(tokens) < 2 or len(tokens) > max_seq_len - 2:  # -2 để dành chỗ cho BOS/EOS nếu cần
+    if len(tokens) < 2 or len(tokens) > max_seq_len - 2:
         continue
     
     # KHÔNG padding ở đây - để train.py xử lý dynamic padding
