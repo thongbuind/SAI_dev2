@@ -7,9 +7,15 @@ from pathlib import Path
 
 current_file = Path(__file__).resolve()
 data_dir = current_file.parent
+config_file = data_dir.parent / "config" / "config.json"
 raw_dir = data_dir / "raw"
 processed_dir = data_dir / "processed"
 processed_dir.mkdir(parents=True, exist_ok=True)
+
+# Đọc config để lấy max_seq_len
+with open(config_file, 'r') as f:
+    config = json.load(f)
+max_seq_len = config['max_seq_len']
 
 # Bước 1: Tải dữ liệu
 dataset = []
@@ -36,24 +42,23 @@ with open(data_dir / "new_vocab.txt", 'w', encoding='utf-8') as f:
     for token, idx in sorted_vocab:
         f.write(f"{token}\t{idx}\n")
 
-# Bước 4: Tạo X, Y, lengths (giống format BOS + tokens | tokens + EOS)
-BOS_id = vocab.get("[BOS]", 0)
-EOS_id = vocab.get("[EOS]", 1)
-
+# Bước 4: Tokenize và tạo X, Y, lengths (cùng format với VnCoreNLP)
 X, Y, lengths = [], [], []
 
 for line in dataset:
-    encoded = tokenizer.encode(line)
-    token_ids = encoded.ids
-    if len(token_ids) < 1:
+    encoded = tokenizer.encode(line.lower())
+    tokens = encoded.ids
+    
+    # Bỏ qua câu quá ngắn hoặc quá dài (giống logic VnCoreNLP)
+    if len(tokens) < 2 or len(tokens) > max_seq_len - 2:  # -2 để dành chỗ cho BOS/EOS nếu cần
         continue
-    inp = [BOS_id] + token_ids
-    tgt = token_ids + [EOS_id]
-    X.append(inp)
-    Y.append(tgt)
-    lengths.append(len(inp))
+    
+    # KHÔNG padding ở đây - để train.py xử lý dynamic padding
+    X.append(tokens)
+    Y.append(tokens)  # Y cũng là tokens (tương tự như VnCoreNLP)
+    lengths.append(len(tokens))
 
-# Bước 5: Lưu toàn bộ thành 1 file .npz
+# Bước 5: Lưu cùng format với VnCoreNLP
 np.savez_compressed(
     processed_dir / "new_data_tokenized.npz",
     X=np.array(X, dtype=object),
@@ -61,5 +66,7 @@ np.savez_compressed(
     lengths=np.array(lengths)
 )
 
-print("✅ Đã lưu X, Y, lengths vào: new_data_tokenized.npz")
-print(f"📊 Tổng số mẫu: {len(X)} | Độ dài TB: {np.mean(lengths):.2f}")
+print(f"✅ Đã lưu dữ liệu vào: {processed_dir}/new_data_tokenized.npz")
+print(f"📊 Tổng số mẫu: {len(X)}")
+print(f"📈 Độ dài sequence trung bình: {np.mean(lengths):.2f}")
+print(f"📉 Độ dài sequence min/max: {min(lengths)}/{max(lengths)}")

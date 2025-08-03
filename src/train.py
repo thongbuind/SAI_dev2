@@ -5,7 +5,7 @@ from model import Model
 import sys
 from pathlib import Path
 
-data_tokenized_path = Path(__file__).parent.parent / "data" / "processed" / "data_tokenized.npz"
+data_tokenized_path = Path(__file__).parent.parent / "data" / "processed" / "new_data_tokenized.npz"
 data = np.load(data_tokenized_path, allow_pickle=True)
 X = data["X"]
 Y = data["Y"]
@@ -19,7 +19,7 @@ config_file = project_root / "config" / "config.json"
 
 with open(config_file, 'r') as f:
     config = json.load(f)
-vocab_size = config['vocab_size']
+vocab_size = 20000
 max_seq_len = config['max_seq_len']
 d_model = config['d_model']
 num_heads = config['num_heads']
