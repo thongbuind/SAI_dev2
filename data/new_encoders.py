@@ -16,6 +16,7 @@ processed_dir.mkdir(parents=True, exist_ok=True)
 with open(config_file, 'r') as f:
     config = json.load(f)
 max_seq_len = config['max_seq_len']
+vocab_size = config['vocab_size']
 
 # Bước 1: Tải dữ liệu
 dataset = []
@@ -28,7 +29,7 @@ tokenizer = Tokenizer(models.BPE())
 tokenizer.normalizer = Sequence([NFD(), Lowercase(), StripAccents()])
 tokenizer.pre_tokenizer = Whitespace()
 trainer = trainers.BpeTrainer(
-    vocab_size=20000, min_frequency=2,
+    vocab_size=vocab_size, min_frequency=2,
     special_tokens=["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "[BOS]", "[EOS]"]
 )
 tokenizer.train_from_iterator(dataset, trainer=trainer)

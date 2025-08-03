@@ -11,8 +11,8 @@ src_dir = current_file.parent
 project_root = src_dir.parent
 sys.path.append(str(project_root))
 config_file = project_root / "config" / "config.json"
-vocab_file = project_root/ "data" / "vocab.txt"
-model_file = project_root / "model" / "s_a_i.keras"
+vocab_file = project_root/ "data" / "new_vocab.txt"
+model_file = project_root / "model" / "test.keras"
 
 model = models.load_model(model_file)
 

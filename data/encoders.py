@@ -8,7 +8,7 @@ current_file = Path(__file__).resolve()
 data_dir = current_file.parent
 config_file = data_dir.parent / "config" / "config.json"
 vocab_file = data_dir / "vocab.txt"
-data_tokenized_dir = data_dir / "processed"  # Lưu folder thay vì file .py
+data_tokenized_dir = data_dir / "processed"
 raw_dir = data_dir / "raw"
 
 with open(config_file, 'r') as f:
