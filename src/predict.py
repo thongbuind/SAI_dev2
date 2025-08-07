@@ -4,15 +4,16 @@ from keras import models
 import json
 import sys
 from pathlib import Path
-from vncorenlp import VnCoreNLP
+from tokenizers import Tokenizer
 
 current_file = Path(__file__).resolve()
 src_dir = current_file.parent
 project_root = src_dir.parent
 sys.path.append(str(project_root))
 config_file = project_root / "config" / "config.json"
-vocab_file = project_root/ "data" / "new_vocab.txt"
-model_file = project_root / "model" / "test.keras"
+vocab_file = project_root/ "data" / "vocab.txt"
+model_file = project_root / "model" / "s_a_i.keras"
+processed_dir = project_root / "data" / "processed"
 
 model = models.load_model(model_file)
 
@@ -29,14 +30,13 @@ with open(vocab_file, "r", encoding="utf-8") as f:
 
 idx2word = {i: w for w, i in vocab.items()}
 
-VNCORENLP_PATH = "/Users/thongbui.nd/vncorenlp/VnCoreNLP/VnCoreNLP-1.1.1.jar"
-annotator = VnCoreNLP(VNCORENLP_PATH, annotators="wseg", max_heap_size='-Xmx2g')
+tokenizer_path = processed_dir / "bpe_tokenizer.json"
+tokenizer = Tokenizer.from_file(str(tokenizer_path))
 
 def tokenize(sentence):
-    """Chuyển đổi câu thành token số, sử dụng VnCoreNLP để tách từ tiếng Việt"""
-    word_segments = annotator.tokenize(sentence.lower())
-    words = [word for segment in word_segments for word in segment]
-    tokens = [vocab.get(w, vocab["[UNK]"]) for w in words]
+    encoded = tokenizer.encode(sentence.lower())
+    tokens = encoded.ids
+    
     return tokens
 
 def detokenize(tokens):

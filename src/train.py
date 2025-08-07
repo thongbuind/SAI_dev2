@@ -5,7 +5,7 @@ from model import Model
 import sys
 from pathlib import Path
 
-data_tokenized_path = Path(__file__).parent.parent / "data" / "processed" / "new_data_tokenized.npz"
+data_tokenized_path = Path(__file__).parent.parent / "data" / "processed" / "data_ids.npz"
 data = np.load(data_tokenized_path, allow_pickle=True)
 X = data["X"]
 Y = data["Y"]
@@ -19,7 +19,7 @@ config_file = project_root / "config" / "config.json"
 
 with open(config_file, 'r') as f:
     config = json.load(f)
-vocab_size = 20000
+vocab_size = config['vocab_size']
 max_seq_len = config['max_seq_len']
 d_model = config['d_model']
 num_heads = config['num_heads']
@@ -78,24 +78,24 @@ def evaluate_model(model, X_val, Y_val, lengths_val, batch_size):
     num_val_batches = (num_val_samples + batch_size - 1) // batch_size
     total_loss = 0.0
     total_batches = 0
-    
+
     for i in range(num_val_batches):
         start_idx = i * batch_size
         end_idx = min(start_idx + batch_size, num_val_samples)
         batch_indices = list(range(start_idx, end_idx))
-        
+
         batch_X, batch_Y, batch_lengths = create_dynamic_batch(X_val, Y_val, lengths_val, batch_indices)
-        
+
         if batch_X.shape[0] < batch_size:
             pad_size = batch_size - batch_X.shape[0]
             current_seq_len = batch_X.shape[1]
             batch_X = np.pad(batch_X, [(0, pad_size), (0, 0)], mode='constant', constant_values=0)
             batch_Y = np.pad(batch_Y, [(0, pad_size), (0, 0)], mode='constant', constant_values=0)
-        
+
         loss = model.test_on_batch(batch_X, batch_Y)
         total_loss += loss
         total_batches += 1
-    
+
     return total_loss / total_batches if total_batches > 0 else float('inf')
 
 X_train, Y_train, lengths_train, X_val, Y_val, lengths_val, X_test, Y_test, lengths_test = split_train_val_test(X, Y, lengths, train_ratio, val_ratio)
@@ -154,7 +154,7 @@ for epoch in range(epochs):
     X_train_shuffled = [X_train[i] for i in train_indices]
     Y_train_shuffled = [Y_train[i] for i in train_indices]
     lengths_train_shuffled = [lengths_train[i] for i in train_indices]
-    
+
     epoch_train_loss = 0.0
     num_train_samples = len(X_train_shuffled)
     num_train_batches = (num_train_samples + batch_size - 1) // batch_size
