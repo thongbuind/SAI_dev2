@@ -142,9 +142,9 @@ lr_scheduler = CustomLRScheduler(model, X_val, Y_val, lengths_val, batch_size)
 num_train_samples = len(X_train)
 num_train_batches = (num_train_samples + batch_size - 1) // batch_size
 
-print("╔═════════════════════════════════════════╗")
-print("║            BẮT ĐẦU PRE-TRAIN            ║")
-print("╠═════════════════════════════════════════╣")
+print("╔════════════════════════════════════════════════════════════════╗")
+print("║                       BẮT ĐẦU PRE-TRAIN                        ║")
+print("╠════════════════════════════════════════════════════════════════╣")
 
 best_val_loss = float('inf')
 patience_counter = 0
@@ -186,14 +186,12 @@ for epoch in range(epochs):
     model_folder.mkdir(parents=True, exist_ok=True)
     model.save(model_folder / "s_a_i.keras")
 
-print("╠═════════════════════════════════════════╣")
-print("║          ĐÁNH GIÁ TRÊN TEST SET         ║")
-print("╠═════════════════════════════════════════╣")
-
+print("╠════════════════════════════════════════════════════════════════╣")
+print("║                     ĐÁNH GIÁ TRÊN TEST SET                     ║")
+print("╠════════════════════════════════════════════════════════════════╣")
 test_loss = evaluate_model(model, X_test, Y_test, lengths_test, batch_size)
-
-print(f"║ Test Loss: {test_loss:.4f}                       ║")
-print("╚═════════════════════════════════════════╝")
+print(f"║ Test Loss: {test_loss:.4f}                                     ║")
+print("╚════════════════════════════════════════════════════════════════╝")
 
 print(f"Đã lưu model cuối cùng vào: {model_folder / 's_a_i.keras'}")
 print(f"Test Loss cuối cùng: {test_loss:.4f}")
