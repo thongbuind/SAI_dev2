@@ -55,38 +55,15 @@ def log_memory_usage(note="", top_k=20):
         pass
 
 def load_data():
-    """Load configuration and data"""
-    sample_ratio = 0.1
-    end_index = 277734   # nếu -1 thì là full data
-    
+    """Load configuration and data"""    
     data_tokenized_path = Path(__file__).parent.parent / "data" / "processed" / "data_ids.npz"
     data = np.load(data_tokenized_path, allow_pickle=True)
-    total_samples = len(data["X"])
 
-    if total_samples < end_index:
-        log_progress("error")
+    X = data["X"]
+    Y = data["Y"]
+    lengths = data["lengths"]
 
-    if end_index != -1:
-            data = {
-                "X": data["X"][:end_index],
-                "Y": data["Y"][:end_index],
-                "lengths": data["lengths"][:end_index]
-            }
-
-    num_samples_to_keep = int(total_samples * sample_ratio)
-    indices_to_keep = np.random.choice(total_samples, size=num_samples_to_keep, replace=False)
-    
-    reduced_data = {
-        "X": data["X"][indices_to_keep],
-        "Y": data["Y"][indices_to_keep],
-        "lengths": data["lengths"][indices_to_keep]
-    }
     data.close()
-
-    X = reduced_data["X"]
-    Y = reduced_data["Y"]
-    lengths = reduced_data["lengths"]
-    reduced_data.clear()
     
     return X, Y, lengths
 
@@ -145,11 +122,12 @@ def create_dataset(X, Y, lengths, batch_size, shuffle=False):
         return x_padded, y_padded
 
     ds = tf.data.Dataset.from_tensor_slices((X_tensor, Y_tensor, lengths_tensor))
-    ds = ds.batch(batch_size, drop_remainder=False)
-    ds = ds.map(pad_batch, num_parallel_calls=tf.data.AUTOTUNE)
 
     if shuffle:
         ds = ds.shuffle(buffer_size=100)
+
+    ds = ds.batch(batch_size, drop_remainder=False)
+    ds = ds.map(pad_batch, num_parallel_calls=tf.data.AUTOTUNE)
 
     ds = ds.prefetch(tf.data.AUTOTUNE)
 
@@ -175,19 +153,16 @@ def evaluate_model(model, dataset):
 
 def train_model(model, train_ds, val_ds, test_ds, epochs, model_folder):
 
-    # Callback để giảm learning rate
     lr_scheduler = tf.keras.callbacks.ReduceLROnPlateau(
         monitor="val_loss", factor=0.5, patience=3, min_lr=1e-6, verbose=1
     )
 
-    # Callback để log progress
     log_callback = tf.keras.callbacks.LambdaCallback(
         on_epoch_end=lambda epoch, logs: log_progress(
             f"Epoch {epoch+1}/{epochs} Train Loss: {logs['loss']:.4f} Val Loss: {logs['val_loss']:.4f}"
         )
     )
 
-    # Callback để lưu model sau mỗi epoch
     checkpoint_cb = tf.keras.callbacks.ModelCheckpoint(
         filepath=model_folder / "s_a_i.keras",
         save_best_only=True,

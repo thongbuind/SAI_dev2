@@ -17,7 +17,7 @@
 
 ---
 
-## Data
+## B. Data
 
 ### Crawl data
 - Từ 2 nguồn chính là wikipedia và huggingface
@@ -28,13 +28,13 @@
 
 ---
 
-## Tokenizer & Encoder
+## C. Tokenizer & Encoder
 
 **Đầu ra ở bước này sẽ là 1 embedding_vector có kích thước [batch_size, seq_len, d_model]**
 
 ---
 
-## Mô hình
+## D. Mô hình
 
 ### Pos Embedding
 
@@ -60,13 +60,13 @@
 
 ---
 
-## Train
+## E. Train
 
-### Create dynamic batch
+### 1. Create Dataset
 
 - Chia data thành các batch. Với mỗi batch, lấy độ dài của seq dài nhất làm độ dài chung của cả batch rồi tiến hành padding theo độ dài đó.
 
-- Nhưng rồi 1 vấn đề xuất hiện, Dynamic padding sẽ làm xuất hiện nhiều shape khác nhau, khiến Tensorflow phải retrace nhiều lần, tạo ra nhiều graph mới, tốn ram. Idea là sẽ cố định một số mốc padding như 50,100,150,...
+- Nhưng rồi 1 vấn đề xuất hiện, Dynamic padding sẽ làm xuất hiện nhiều shape khác nhau, khiến Tensorflow phải retrace nhiều lần, tạo ra nhiều graph mới, tốn ram. Idea là sẽ cố định một số mốc padding như 20,40,60,80,100,...
 
 - ==> Bucketing Padding.
 
@@ -98,5 +98,5 @@
 
 ---
 
-## Predict
+## F. Predict
 
