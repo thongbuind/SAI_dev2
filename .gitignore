@@ -13,6 +13,8 @@ __pycache__/
 
 # data
 data/processed/pretrain_data_ids.npz
+data/processed/pretrain_data_shorted_ids.npz
+data/processed/continued_pretrain_data_ids.npz
 data/processed/finetune_data_ids.npz
 data/raw/pretrain_data.jsonl
 data/raw/shorted_data.jsonl

@@ -1,34 +1,35 @@
-import tensorflow as tf
-from keras import layers, models
+import torch
+import torch.nn as nn
+import torch.nn.functional as functional
 
-class RotaryPositionalEmbedding(layers.Layer):
-    def __init__(self, d_model, max_seq_len, **kwargs):
-        super().__init__(**kwargs)
-
+class RotaryPositionalEmbedding(nn.Module):
+    def __init__(self, d_model, max_seq_len):
+        super().__init__()
+        
         self.d_model = d_model
         self.max_seq_len = max_seq_len
         
-        inv_freq = 1.0 / (10000 ** (tf.range(0, d_model, 2, dtype=tf.float32) / d_model))
-        self.inv_freq = tf.Variable(inv_freq, trainable=False, name="inv_freq")
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, d_model, 2, dtype=torch.float32) / d_model))
+        self.register_buffer('inv_freq', inv_freq)
         
-        position = tf.range(max_seq_len, dtype=tf.float32)
-        freqs = tf.einsum('i,j->ij', position, inv_freq)
+        position = torch.arange(max_seq_len, dtype=torch.float32)
+        freqs = torch.einsum('i,j->ij', position, inv_freq)
         
-        cos_freqs = tf.cos(freqs)
-        sin_freqs = tf.sin(freqs)
+        cos_freqs = torch.cos(freqs)
+        sin_freqs = torch.sin(freqs)
         
-        cos_freqs = tf.repeat(cos_freqs, 2, axis=-1)
-        sin_freqs = tf.repeat(sin_freqs, 2, axis=-1)
+        cos_freqs = torch.repeat_interleave(cos_freqs, 2, dim=-1)
+        sin_freqs = torch.repeat_interleave(sin_freqs, 2, dim=-1)
         
-        self.cos_cached = tf.Variable(cos_freqs, trainable=False, name="cos_freqs")
-        self.sin_cached = tf.Variable(sin_freqs, trainable=False, name="sin_freqs")
+        self.register_buffer('cos_cached', cos_freqs)
+        self.register_buffer('sin_cached', sin_freqs)
     
-    def call(self, seq_len):
+    def forward(self, seq_len):
         cos_freqs = self.cos_cached[:seq_len, :]
         sin_freqs = self.sin_cached[:seq_len, :]
         
-        cos_freqs = tf.expand_dims(cos_freqs, 0)
-        sin_freqs = tf.expand_dims(sin_freqs, 0)
+        cos_freqs = cos_freqs.unsqueeze(0)
+        sin_freqs = sin_freqs.unsqueeze(0)
         
         return cos_freqs, sin_freqs
     
@@ -43,14 +44,14 @@ class RotaryPositionalEmbedding(layers.Layer):
         rotated_x_even = x_even * cos_half - x_odd * sin_half
         rotated_x_odd = x_even * sin_half + x_odd * cos_half
         
-        rotated_x = tf.stack([rotated_x_even, rotated_x_odd], axis=-1)
-        rotated_x = tf.reshape(rotated_x, tf.shape(x))
+        rotated_x = torch.stack([rotated_x_even, rotated_x_odd], dim=-1)
+        rotated_x = rotated_x.reshape(x.shape)
         
         return rotated_x
 
-class MultiHeadAttention(layers.Layer):
-    def __init__(self, d_model, num_heads, max_seq_len, dropout_rate, **kwargs):
-        super().__init__(**kwargs)
+class MultiHeadAttention(nn.Module):
+    def __init__(self, d_model, num_heads, max_seq_len, dropout_rate):
+        super().__init__()
         
         self.d_model = d_model
         self.num_heads = num_heads
@@ -58,58 +59,57 @@ class MultiHeadAttention(layers.Layer):
         self.max_seq_len = max_seq_len
         self.dropout_rate = dropout_rate
         
-        self.wq = layers.Dense(d_model, name="query")
-        self.wk = layers.Dense(d_model, name="key")
-        self.wv = layers.Dense(d_model, name="value")
-        self.wo = layers.Dense(d_model, name="output")
+        self.wq = nn.Linear(d_model, d_model)
+        self.wk = nn.Linear(d_model, d_model)
+        self.wv = nn.Linear(d_model, d_model)
+        self.wo = nn.Linear(d_model, d_model)
         
         self.rope = RotaryPositionalEmbedding(self.d_k, max_seq_len)
-
-        mask = tf.linalg.band_part(tf.ones((max_seq_len, max_seq_len)), -1, 0)
-        mask = tf.where(mask == 0, -1e9, 0.0)
-        self.causal_mask = tf.Variable(mask, trainable=False, name="causal_mask")
+        
+        mask = torch.tril(torch.ones(max_seq_len, max_seq_len))
+        mask = torch.where(mask == 0, torch.tensor(-1e9), torch.tensor(0.0))
+        self.register_buffer('causal_mask', mask)
     
-    def call(self, x, training=False, pad_mask=None):
-        batch_size = tf.shape(x)[0]
-        seq_len = tf.shape(x)[1]
+    def forward(self, x, pad_mask=None):
+        batch_size, seq_len, _ = x.shape
         
         q = self.wq(x)  # [batch, seq_len, d_model]
         k = self.wk(x)
         v = self.wv(x)
         
-        q = tf.reshape(q, (batch_size, seq_len, self.num_heads, self.d_k))
-        k = tf.reshape(k, (batch_size, seq_len, self.num_heads, self.d_k))
-        v = tf.reshape(v, (batch_size, seq_len, self.num_heads, self.d_k))
+        q = q.view(batch_size, seq_len, self.num_heads, self.d_k)
+        k = k.view(batch_size, seq_len, self.num_heads, self.d_k)
+        v = v.view(batch_size, seq_len, self.num_heads, self.d_k)
         
         cos_freqs, sin_freqs = self.rope(seq_len)
-        cos_freqs = tf.reshape(cos_freqs, (1, seq_len, 1, self.d_k))
-        sin_freqs = tf.reshape(sin_freqs, (1, seq_len, 1, self.d_k))
+        cos_freqs = cos_freqs.view(1, seq_len, 1, self.d_k)
+        sin_freqs = sin_freqs.view(1, seq_len, 1, self.d_k)
         
         q = self.rope.apply_rope(q, cos_freqs, sin_freqs)
         k = self.rope.apply_rope(k, cos_freqs, sin_freqs)
         
-        q = tf.transpose(q, [0, 2, 1, 3])  # [batch, num_heads, seq_len, d_k]
-        k = tf.transpose(k, [0, 2, 1, 3])
-        v = tf.transpose(v, [0, 2, 1, 3])
+        q = q.transpose(1, 2)  # [batch, num_heads, seq_len, d_k]
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
         
-        scores = tf.matmul(q, k, transpose_b=True) / tf.sqrt(tf.cast(self.d_k, tf.float32))
+        scores = torch.matmul(q, k.transpose(-2, -1)) / torch.sqrt(torch.tensor(self.d_k, dtype=torch.float32))
         
         causal_mask = self.causal_mask[:seq_len, :seq_len]
-        scores += causal_mask
+        scores = scores + causal_mask
         
         if pad_mask is not None:
-            pad_mask = tf.cast(pad_mask, tf.float32)
-            pad_mask = pad_mask[:, tf.newaxis, tf.newaxis, :]
-            scores += (1.0 - pad_mask) * -1e9
+            pad_mask = pad_mask.float()
+            pad_mask = pad_mask.unsqueeze(1).unsqueeze(2)
+            scores = scores + (1.0 - pad_mask) * -1e9
         
-        attention_weights = tf.nn.softmax(scores, axis=-1)
+        attention_weights = functional.softmax(scores, dim=-1)
         
-        if training and self.dropout_rate > 0:
-            attention_weights = tf.nn.dropout(attention_weights, rate=self.dropout_rate)
+        if self.training and self.dropout_rate > 0:
+            attention_weights = functional.dropout(attention_weights, p=self.dropout_rate)
         
-        attention_output = tf.matmul(attention_weights, v)
-        attention_output = tf.transpose(attention_output, [0, 2, 1, 3])
-        attention_output = tf.reshape(attention_output, (batch_size, seq_len, self.d_model))
+        attention_output = torch.matmul(attention_weights, v)
+        attention_output = attention_output.transpose(1, 2)
+        attention_output = attention_output.contiguous().view(batch_size, seq_len, self.d_model)
         
         return self.wo(attention_output)
     
@@ -123,33 +123,35 @@ class MultiHeadAttention(layers.Layer):
         })
         return config
 
-class DecoderBlock(layers.Layer):
-    def __init__(self, d_model, num_heads, ff_dim, max_seq_len, dropout, **kwargs):
-        super().__init__(**kwargs)
+class DecoderBlock(nn.Module):
+    def __init__(self, d_model, num_heads, ff_dim, max_seq_len, dropout):
+        super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
         self.ff_dim = ff_dim
         self.max_seq_len = max_seq_len
         self.dropout = dropout
-
+        
         self.mha = MultiHeadAttention(d_model, num_heads, max_seq_len, dropout)
         
-        self.ffn = tf.keras.Sequential([
-            layers.Dense(ff_dim, activation='relu'),
-            layers.Dense(d_model),
-        ])
-        self.layernorm1 = layers.LayerNormalization(epsilon=1e-6)
-        self.layernorm2 = layers.LayerNormalization(epsilon=1e-6)
-        self.dropout1 = layers.Dropout(dropout)
-        self.dropout2 = layers.Dropout(dropout)
-
-    def call(self, x, training=False, pad_mask=None):
-        attn_output = self.mha(x, training=training, pad_mask=pad_mask)
-        attn_output = self.dropout1(attn_output, training=training)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, ff_dim),
+            nn.ReLU(),
+            nn.Linear(ff_dim, d_model),
+        )
+        
+        self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
+        self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+    
+    def forward(self, x, pad_mask=None):
+        attn_output = self.mha(x, pad_mask=pad_mask)
+        attn_output = self.dropout1(attn_output)
         out1 = self.layernorm1(x + attn_output)
-
+        
         ffn_output = self.ffn(out1)
-        ffn_output = self.dropout2(ffn_output, training=training)
+        ffn_output = self.dropout2(ffn_output)
         return self.layernorm2(out1 + ffn_output)
     
     def get_config(self):
@@ -163,9 +165,9 @@ class DecoderBlock(layers.Layer):
         })
         return config
 
-class Model(models.Model):
-    def __init__(self, vocab_size, d_model, num_heads, num_layers, ff_dim, max_seq_len, dropout, **kwargs):
-        super().__init__(**kwargs)
+class TransformerModel(nn.Module):
+    def __init__(self, vocab_size, d_model, num_heads, num_layers, ff_dim, max_seq_len, dropout):
+        super().__init__()
         self.vocab_size = vocab_size
         self.d_model = d_model
         self.num_heads = num_heads
@@ -173,28 +175,26 @@ class Model(models.Model):
         self.ff_dim = ff_dim
         self.max_seq_len = max_seq_len
         self.dropout_rate = dropout
-
-        self.token_embedding = layers.Embedding(
-            input_dim=vocab_size, 
-            output_dim=d_model
-        )
-
-        self.decoder_blocks = [
+        
+        self.token_embedding = nn.Embedding(vocab_size, d_model)
+        
+        self.decoder_blocks = nn.ModuleList([
             DecoderBlock(d_model, num_heads, ff_dim, max_seq_len, dropout)
             for _ in range(num_layers)
-        ]
-        self.dropout_layer = layers.Dropout(dropout)
-        self.final_layer = layers.Dense(vocab_size)
-
-    def call(self, inputs, training=False):
-        pad_mask = tf.cast(tf.not_equal(inputs, 0), tf.float32)
+        ])
+        
+        self.dropout_layer = nn.Dropout(dropout)
+        self.final_layer = nn.Linear(d_model, vocab_size)
+    
+    def forward(self, inputs):
+        pad_mask = (inputs != 0).float()
         
         x = self.token_embedding(inputs)
-        x = self.dropout_layer(x, training=training)
-
+        x = self.dropout_layer(x)
+        
         for block in self.decoder_blocks:
-            x = block(x, training=training, pad_mask=pad_mask)
-
+            x = block(x, pad_mask=pad_mask)
+        
         logits = self.final_layer(x)
         return logits
     
@@ -210,4 +210,3 @@ class Model(models.Model):
             "dropout": self.dropout_rate,
         })
         return config
-    

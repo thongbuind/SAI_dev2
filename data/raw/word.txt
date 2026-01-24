@@ -543,6 +543,7 @@ cứu
 cừu
 cửu
 cựu
+crush
 da
 dã
 dạ
@@ -2376,6 +2377,7 @@ tay
 tày
 tây
 tẩy
+tbui
 tè
 tê
 tẻ
