@@ -186,8 +186,11 @@ class TransformerModel(nn.Module):
         self.dropout_layer = nn.Dropout(dropout)
         self.final_layer = nn.Linear(d_model, vocab_size)
     
-    def forward(self, inputs):
-        pad_mask = (inputs != 0).float()
+    def forward(self, inputs, attention_mask=None):
+        if attention_mask is None:
+            pad_mask = (inputs != 0).float()
+        else:
+            pad_mask = attention_mask
         
         x = self.token_embedding(inputs)
         x = self.dropout_layer(x)
@@ -197,6 +200,25 @@ class TransformerModel(nn.Module):
         
         logits = self.final_layer(x)
         return logits
+    
+    def forward_hidden(self, inputs, attention_mask=None):
+        """
+        ở đầu vào, mỗi token được biểu diễn bởi 1 vector d_model chiều, sau đó nối lại thành 1 seq, 
+        quá trình đi qua transformer thì forward_hidden sẽ trả về 1 vector có seq_len phần tử, 
+        mỗi phần tử là 1 vector d_model chiều mô tả mối quan hệ, ngữ nghĩa của token đó ở trong câu
+        """
+        if attention_mask is None:
+            pad_mask = (inputs != 0).float()
+        else:
+            pad_mask = attention_mask
+        
+        x = self.token_embedding(inputs)
+        x = self.dropout_layer(x)
+        
+        for block in self.decoder_blocks:
+            x = block(x, pad_mask=pad_mask)
+        
+        return x
     
     def get_config(self):
         config = super().get_config()
