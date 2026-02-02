@@ -27,7 +27,6 @@ def pretrain(model, optimizer, device, pretrain_tokenized_file, num_epochs, mode
     print("╠════════════════════════════════════════════════════════════════════════════════════╣")
 
     X, Y, lengths = load_data("pretrain", pretrain_tokenized_file)
-    # SỬA LỖI: Thêm None cho loss_masks vì pretrain không có
     X_train, Y_train, _, lengths_train, X_val, Y_val, _, lengths_val, X_test, Y_test, _, lengths_test = split_train_val_test(X, Y, None, lengths, train_ratio, val_ratio)
     log_progress(f"Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
     
@@ -45,8 +44,6 @@ def pretrain(model, optimizer, device, pretrain_tokenized_file, num_epochs, mode
     lr_lambda = get_step_lr_lambda(warmup_steps, total_steps)
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
-    log_progress(f"Step-based LR: warmup={warmup_steps} steps, total={total_steps} steps")
-
     criterion = nn.CrossEntropyLoss(reduction='none')
     best_val_loss = float('inf')
     global_step = 0
@@ -159,7 +156,6 @@ def continued_pretrain(model, optimizer, device, continued_pretrain_tokenized_fi
     print("╠════════════════════════════════════════════════════════════════════════════════════╣")
 
     X, Y, lengths = load_data("continued_pretrain", continued_pretrain_tokenized_file, pretrain_tokenized_file)
-    # SỬA LỖI: Thêm None cho loss_masks
     X_train, Y_train, _, lengths_train, X_val, Y_val, _, lengths_val, X_test, Y_test, _, lengths_test = split_train_val_test(X, Y, None, lengths, train_ratio, val_ratio)
     log_progress(f"Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
     
@@ -176,8 +172,6 @@ def continued_pretrain(model, optimizer, device, continued_pretrain_tokenized_fi
     warmup_steps = len(train_ds) // 2
     lr_lambda = get_step_lr_lambda(warmup_steps, total_steps)
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-    
-    log_progress(f"Step-based LR: warmup={warmup_steps} steps, total={total_steps} steps")
 
     criterion = nn.CrossEntropyLoss(reduction='none')
     best_val_loss = float('inf')
@@ -298,14 +292,13 @@ if __name__ == "__main__":
     batch_size = config['batch_size']
     train_ratio = config['train_ratio']
     val_ratio = config['val_ratio']
-    learning_rate = config['learning_rate']
+    pretrain_learning_rate = config['pretrain_learning_rate']
+    continued_pretrain_learning_rate = config['continued_pretrain_learning_rate']
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    log_progress(f"Sử dụng device: {device}")
-    log_progress(f"Training với step-based LR scheduling (warmup → plateau → decay)")
     
     model = TransformerModel(vocab_size, d_model, num_heads, num_layers, ff_dim, max_seq_len, dropout).to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
+    optimizer = optim.AdamW(model.parameters(), lr=pretrain_learning_rate, weight_decay=0.3)
 
     print("╠════════════════════════════════════════════════════════════════════════════════════╣")
     print("║                                 BẮT ĐẦU TRAINING                                   ║")
@@ -326,6 +319,9 @@ if __name__ == "__main__":
     log_progress(f"Đang load best model từ pretrain để tiếp tục training...")
     model.load_state_dict(torch.load(model_dir / "pretrained.pt", map_location=device))
     model.to(device)
+    
+    optimizer = optim.AdamW(model.parameters(), lr=continued_pretrain_learning_rate, weight_decay=0.05)
+    log_progress(f"Reset optimizer với learning rate: {continued_pretrain_learning_rate}")
 
     continued_pretrain_test_loss = continued_pretrain(
         model,
