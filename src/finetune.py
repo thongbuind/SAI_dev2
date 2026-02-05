@@ -8,7 +8,6 @@ import sys
 from utils import split_train_val_test, get_step_lr_lambda, create_dataset, log_progress, load_data
 from model import TransformerModel
 
-# ===== PATH =====
 current_file = Path(__file__).resolve()
 project_root = current_file.parent.parent
 sys.path.append(str(project_root))
@@ -27,20 +26,18 @@ Lưu ý khi finetune:
     - Format cố định
     - Cách dùng instruct
     - Learning rate 0.0001
-    - Weight decay = 0
+    - Weight decay = 0.0
     - Chỉ tính loss trên phần output, không tính loss trên instruct (nếu có thì sẽ thành model học coppy promt)
     - Chiến thuật: freeze một phần model (có nhiều hướng, tìm hiểu dần)
 """
 
-def finetune(model,optimizer,device,finetune_tokenized_file,num_epochs,model_folder,train_ratio,val_ratio,batch_size):
+def finetune(model, optimizer, device, finetune_tokenized_file, num_epochs, model_folder, train_ratio, val_ratio, batch_size):
     print("╔════════════════════════════════════════════════════════════════════════════════════╗")
     print("║                              BẮT ĐẦU LOAD FINETUNE DATA                            ║")
     print("╠════════════════════════════════════════════════════════════════════════════════════╣")
 
-    # SỬA LỖI: load_data trả về X, Y, loss_mask, lengths
     X, Y, loss_mask, lengths = load_data("finetune", finetune_tokenized_file)
     
-    # SỬA LỖI: split_train_val_test nhận loss_mask và trả về 12 giá trị
     X_train, Y_train, mask_train, len_train, \
     X_val, Y_val, mask_val, len_val, \
     X_test, Y_test, mask_test, len_test = split_train_val_test(
@@ -49,7 +46,6 @@ def finetune(model,optimizer,device,finetune_tokenized_file,num_epochs,model_fol
 
     log_progress(f"Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
 
-    # SỬA LỖI: Sử dụng tham số loss_masks thay vì sample_weight
     train_ds = create_dataset(
         X_train, Y_train, len_train,
         batch_size,
@@ -76,7 +72,6 @@ def finetune(model,optimizer,device,finetune_tokenized_file,num_epochs,model_fol
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # ===== SCHEDULER =====
     total_steps = len(train_ds) * num_epochs
     warmup_steps = len(train_ds) // 5
     lr_lambda = get_step_lr_lambda(warmup_steps, total_steps)
@@ -84,12 +79,10 @@ def finetune(model,optimizer,device,finetune_tokenized_file,num_epochs,model_fol
 
     log_progress(f"Step-based LR: warmup={warmup_steps} steps, total={total_steps} steps")
 
-    # ===== LOSS =====
     criterion = nn.CrossEntropyLoss(reduction="none")
     best_val_loss = float("inf")
     global_step = 0
 
-    # ===== TRAIN =====
     for epoch in range(num_epochs):
         model.train()
         train_loss = 0.0
@@ -142,7 +135,6 @@ def finetune(model,optimizer,device,finetune_tokenized_file,num_epochs,model_fol
         print()
         train_loss /= len(train_ds)
 
-        # ===== VALIDATION =====
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
@@ -179,7 +171,6 @@ def finetune(model,optimizer,device,finetune_tokenized_file,num_epochs,model_fol
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    # ===== TEST =====
     print("╠════════════════════════════════════════════════════════════════════════════════════╣")
     print("║                               ĐÁNH GIÁ TRÊN TEST SET                               ║")
     print("╠════════════════════════════════════════════════════════════════════════════════════╣")
