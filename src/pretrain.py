@@ -294,11 +294,13 @@ if __name__ == "__main__":
     val_ratio = config['val_ratio']
     pretrain_learning_rate = config['pretrain_learning_rate']
     continued_pretrain_learning_rate = config['continued_pretrain_learning_rate']
+    pretrain_weight_decay = config['pretrain_weight_decay']
+    continued_pretrain_weight_decay = config['continued_pretrain_weight_decay']
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'mps:0')
     
     model = TransformerModel(vocab_size, d_model, num_heads, num_layers, ff_dim, max_seq_len, dropout).to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=pretrain_learning_rate, weight_decay=0.3)
+    optimizer = optim.AdamW(model.parameters(), lr=pretrain_learning_rate, weight_decay=pretrain_weight_decay)
 
     print("╠════════════════════════════════════════════════════════════════════════════════════╣")
     print("║                                 BẮT ĐẦU TRAINING                                   ║")
@@ -320,7 +322,7 @@ if __name__ == "__main__":
     model.load_state_dict(torch.load(model_dir / "pretrained.pt", map_location=device))
     model.to(device)
     
-    optimizer = optim.AdamW(model.parameters(), lr=continued_pretrain_learning_rate, weight_decay=0.05)
+    optimizer = optim.AdamW(model.parameters(), lr=continued_pretrain_learning_rate, weight_decay=continued_pretrain_weight_decay)
     log_progress(f"Reset optimizer với learning rate: {continued_pretrain_learning_rate}")
 
     continued_pretrain_test_loss = continued_pretrain(
