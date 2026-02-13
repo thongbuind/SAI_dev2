@@ -18,13 +18,13 @@ src_dir = project_root / "src"
 config_file = config_dir / "config.json"
 model_dir.mkdir(parents=True, exist_ok=True)
 data_processed_dir = project_root / "data" / "processed"
-finetune_tokenized_file = data_processed_dir / "finetune_data_ids.npz"
+SFT1_data_ids_file = data_processed_dir / "SFT1_data_ids.npz"
+SFT2_data_ids_file = data_processed_dir / "SFT2_data_ids.npz"
 
-
-def finetune(model, optimizer, device, finetune_tokenized_file, num_epochs, model_folder, train_ratio, val_ratio, batch_size):
-    print("╔════════════════════════════════════════════════════════════════════════════════════╗")
-    print("║                              BẮT ĐẦU LOAD FINETUNE DATA                            ║")
-    print("╠════════════════════════════════════════════════════════════════════════════════════╣")
+def finetune(model, optimizer, device, finetune_tokenized_file, num_epochs, model_save_path, train_ratio, val_ratio, batch_size, phase_name):
+    print(f"╔════════════════════════════════════════════════════════════════════════════════════╗")
+    print(f"║                              BẮT ĐẦU LOAD {phase_name.upper():<25} DATA                ║")
+    print(f"╠════════════════════════════════════════════════════════════════════════════════════╣")
 
     X, Y, loss_mask, lengths = load_data("finetune", finetune_tokenized_file)
     
@@ -34,26 +34,11 @@ def finetune(model, optimizer, device, finetune_tokenized_file, num_epochs, mode
         X, Y, loss_mask, lengths, train_ratio, val_ratio
     )
 
-    log_progress(f"Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
+    log_progress(f"[{phase_name}] Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
 
-    train_ds = create_dataset(
-        X_train, Y_train, len_train,
-        batch_size,
-        shuffle=True,
-        loss_masks=mask_train
-    )
-    val_ds = create_dataset(
-        X_val, Y_val, len_val,
-        batch_size,
-        shuffle=False,
-        loss_masks=mask_val
-    )
-    test_ds = create_dataset(
-        X_test, Y_test, len_test,
-        batch_size,
-        shuffle=False,
-        loss_masks=mask_test
-    )
+    train_ds = create_dataset(X_train, Y_train, len_train, batch_size, shuffle=True, loss_masks=mask_train)
+    val_ds = create_dataset(X_val, Y_val, len_val, batch_size, shuffle=False, loss_masks=mask_val)
+    test_ds = create_dataset(X_test, Y_test, len_test, batch_size, shuffle=False, loss_masks=mask_test)
 
     del X_train, Y_train, mask_train, len_train
     del X_val, Y_val, mask_val, len_val
@@ -86,41 +71,25 @@ def finetune(model, optimizer, device, finetune_tokenized_file, num_epochs, mode
             attention_mask = attention_mask.to(device, non_blocking=True)
 
             optimizer.zero_grad()
-
             outputs = model(X_batch, attention_mask=attention_mask)
-            loss_per_token = criterion(
-                outputs.view(-1, outputs.size(-1)),
-                Y_batch.view(-1)
-            )
-
+            loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
+            
             num_valid_tokens = sample_weight.sum()
             loss = (loss_per_token * sample_weight.view(-1)).sum() / (num_valid_tokens + 1e-8)
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
             optimizer.step()
             scheduler.step()
 
             train_loss += loss.item()
             batch_count += 1
             global_step += 1
-
             current_lr = optimizer.param_groups[0]["lr"]
 
             if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == total_batches:
                 avg_loss = train_loss / batch_count
-                print(
-                    f"\rEpoch {epoch+1}/{num_epochs} "
-                    f"- Step {global_step}/{total_steps} "
-                    f"- loss: {avg_loss:.4f} "
-                    f"- lr: {current_lr:.2e}",
-                    end=""
-                )
-
-            del X_batch, Y_batch, outputs, loss, sample_weight, attention_mask
-            if (batch_idx + 1) % 50 == 0 and torch.cuda.is_available():
-                torch.cuda.empty_cache()
+                print(f"\r{phase_name} | Epoch {epoch+1}/{num_epochs} - Step {global_step}/{total_steps} - loss: {avg_loss:.4f} - lr: {current_lr:.2e}", end="")
 
         print()
         train_loss /= len(train_ds)
@@ -129,69 +98,43 @@ def finetune(model, optimizer, device, finetune_tokenized_file, num_epochs, mode
         val_loss = 0.0
         with torch.no_grad():
             for X_batch, Y_batch, sample_weight, attention_mask in val_ds:
-                X_batch = X_batch.to(device, non_blocking=True)
-                Y_batch = Y_batch.to(device, non_blocking=True)
-                sample_weight = sample_weight.to(device, non_blocking=True)
-                attention_mask = attention_mask.to(device, non_blocking=True)
-
+                X_batch, Y_batch, sample_weight, attention_mask = X_batch.to(device, non_blocking=True), Y_batch.to(device, non_blocking=True), sample_weight.to(device, non_blocking=True), attention_mask.to(device, non_blocking=True)
                 outputs = model(X_batch, attention_mask=attention_mask)
-                loss_per_token = criterion(
-                    outputs.view(-1, outputs.size(-1)),
-                    Y_batch.view(-1)
-                )
-
+                loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
                 num_valid_tokens = sample_weight.sum()
                 loss = (loss_per_token * sample_weight.view(-1)).sum() / (num_valid_tokens + 1e-8)
                 val_loss += loss.item()
 
-                del X_batch, Y_batch, outputs, loss, sample_weight, attention_mask
-
         val_loss /= len(val_ds)
-        log_progress(
-            f"Epoch {epoch+1}/{num_epochs} "
-            f"Train Loss: {train_loss:.4f} "
-            f"Val Loss: {val_loss:.4f}"
-        )
+        log_progress(f"{phase_name} Epoch {epoch+1}/{num_epochs} Train Loss: {train_loss:.4f} Val Loss: {val_loss:.4f}")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), model_folder / "finetune.pt")
+            torch.save(model.state_dict(), model_save_path)
             print(f"Epoch {epoch+1}: val_loss improved to {val_loss:.5f}, saving model")
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    print("╠════════════════════════════════════════════════════════════════════════════════════╣")
-    print("║                               ĐÁNH GIÁ TRÊN TEST SET                               ║")
-    print("╠════════════════════════════════════════════════════════════════════════════════════╣")
+    print(f"╠════════════════════════════════════════════════════════════════════════════════════╣")
+    print(f"║                               ĐÁNH GIÁ {phase_name.upper():<25} TRÊN TEST SET           ║")
+    print(f"╠════════════════════════════════════════════════════════════════════════════════════╣")
 
+    model.load_state_dict(torch.load(model_save_path))
     model.eval()
     test_loss = 0.0
     with torch.no_grad():
         for X_batch, Y_batch, sample_weight, attention_mask in test_ds:
-            X_batch = X_batch.to(device)
-            Y_batch = Y_batch.to(device)
-            sample_weight = sample_weight.to(device)
-            attention_mask = attention_mask.to(device)
-
+            X_batch, Y_batch, sample_weight, attention_mask = X_batch.to(device), Y_batch.to(device), sample_weight.to(device), attention_mask.to(device)
             outputs = model(X_batch, attention_mask=attention_mask)
-            loss_per_token = criterion(
-                outputs.view(-1, outputs.size(-1)),
-                Y_batch.view(-1)
-            )
-
+            loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
             num_valid_tokens = sample_weight.sum()
             loss = (loss_per_token * sample_weight.view(-1)).sum() / (num_valid_tokens + 1e-8)
             test_loss += loss.item()
 
-            del X_batch, Y_batch, outputs, loss, sample_weight, attention_mask
-
     test_loss /= len(test_ds)
-    log_progress(f"Test Loss: {test_loss:.4f}")
-    print("╚════════════════════════════════════════════════════════════════════════════════════╝")
-
+    log_progress(f"{phase_name} Test Loss: {test_loss:.4f}")
     return test_loss
-
 
 # ===== MAIN =====
 if __name__ == "__main__":
@@ -209,48 +152,44 @@ if __name__ == "__main__":
     batch_size = config["batch_size"]
     train_ratio = config["train_ratio"]
     val_ratio = config["val_ratio"]
-    finetune_learning_rate = config["finetune_learning_rate"]
-    finetune_weight_decay = config["finetune_weight_decay"]
+    SFT_1_learning_rate = config["SFT_1_learning_rate"]
+    SFT_1_learning_weight_decay = config["SFT_1_learning_weight_decay"]
+    SFT_2_learning_rate = config["SFT_2_learning_rate"]
+    SFT_2_learning_weight_decay = config["SFT_2_learning_weight_decay"]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log_progress(f"Sử dụng device: {device}")
-    log_progress("Finetune với masked loss (assistant-only)")
+    log_progress("Finetune 2 giai đoạn với masked loss")
 
-    model = TransformerModel(
-        vocab_size,
-        d_model,
-        num_heads,
-        num_layers,
-        ff_dim,
-        max_seq_len,
-        dropout
-    ).to(device)
+    model = TransformerModel(vocab_size, d_model, num_heads, num_layers, ff_dim, max_seq_len, dropout).to(device)
 
     log_progress("Load model từ continued-pretrain...")
     model.load_state_dict(torch.load(model_dir / "pretrained.pt", map_location=device))
     model.to(device)
 
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=finetune_learning_rate * 0.1,
-        weight_decay=finetune_weight_decay
+    optimizer_sft1 = optim.AdamW(model.parameters(), lr=SFT_1_learning_rate, weight_decay=SFT_1_learning_weight_decay)
+    
+    test_loss_sft1 = finetune(
+        model, optimizer_sft1, device, SFT1_data_ids_file,
+        num_epochs=epochs, 
+        model_save_path=model_dir / "sft1.pt",
+        train_ratio=train_ratio, val_ratio=val_ratio,
+        batch_size=batch_size, phase_name="sft1"
     )
 
-    print("╔════════════════════════════════════════════════════════════════════════════════════╗")
-    print("║                                 BẮT ĐẦU FINETUNE                                   ║")
-    print("╚════════════════════════════════════════════════════════════════════════════════════╝")
-
-    finetune_test_loss = finetune(
-        model,
-        optimizer,
-        device,
-        finetune_tokenized_file,
+    log_progress("Chuyển sang Giai đoạn 2: Instruction Tuning...")
+    model.load_state_dict(torch.load(model_dir / "sft1.pt", map_location=device))
+    
+    optimizer_sft2 = optim.AdamW(model.parameters(), lr=SFT_2_learning_rate, weight_decay=SFT_2_learning_weight_decay)
+    
+    test_loss_sft2 = finetune(
+        model, optimizer_sft2, device, SFT2_data_ids_file,
         num_epochs=epochs,
-        model_folder=model_dir,
-        train_ratio=train_ratio,
-        val_ratio=val_ratio,
-        batch_size=batch_size
+        model_save_path=model_dir / "sft2.pt",
+        train_ratio=train_ratio, val_ratio=val_ratio,
+        batch_size=batch_size, phase_name="sft2"
     )
 
-    log_progress(f"Finetune Test Loss: {finetune_test_loss:.4f}")
-    log_progress(f"Model finetune lưu tại: {model_dir / 'finetune.pt'}")
+    log_progress(f"SFT1 Test Loss: {test_loss_sft1:.4f}")
+    log_progress(f"SFT2 Test Loss: {test_loss_sft2:.4f}")
+    log_progress(f"Model cuối cùng lưu tại: {model_dir / 'sft2.pt'}")
