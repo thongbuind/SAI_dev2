@@ -71,6 +71,7 @@ def build_dataset(texts, tokenizer, vocab, max_seq_len):
 
 pretrain_texts = load_text_jsonl(raw_dir / "pretrain_data.jsonl")
 X, Y, lengths = build_dataset(pretrain_texts, tokenizer, vocab, max_seq_len)
+print(f"✅ Pretrain: {len(X)} samples | Tổng số token: {sum(lengths):,}")
 np.savez_compressed(processed_dir / "pretrain_data_ids.npz", X=np.array(X, dtype=object), Y=np.array(Y, dtype=object), lengths=np.array(lengths))
 
 continued_texts = load_text_jsonl(raw_dir / "continued_pretrain_data.jsonl")
