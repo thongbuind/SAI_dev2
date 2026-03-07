@@ -2,6 +2,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.amp import autocast, GradScaler
 import json
 import gc
 import sys
@@ -22,6 +23,8 @@ model_dir.mkdir(parents=True, exist_ok=True)
 data_processed_dir = project_root / "data" / "processed"
 SFT1_data_ids_file = data_processed_dir / "SFT1_data_ids.npz"
 SFT2_data_ids_file = data_processed_dir / "SFT2_data_ids.npz"
+
+ACCUMULATION_STEPS = 4
 
 def _build_val_test_loaders(phase_name, main_data, sub_data, train_ratio, val_ratio, batch_size):
     X, Y, loss_mask, lengths = load_data(phase_name, main_data, sub_data)
@@ -84,7 +87,7 @@ def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_sa
             X, Y, loss_mask, lengths, train_ratio, val_ratio
         )
 
-        log_progress(f"[{phase_name}] Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
+        log_progress(f"Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
 
         train_ds = Dataset.create_dataloader(X_train, Y_train, len_train, batch_size, shuffle=True, loss_masks=mask_train)
         val_ds = Dataset.create_dataloader(X_val, Y_val, len_val, batch_size, shuffle=False, loss_masks=mask_val)
@@ -97,16 +100,16 @@ def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_sa
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        total_steps = len(train_ds) * num_epochs
+        total_steps = len(train_ds) * num_epochs // ACCUMULATION_STEPS
 
     else:
         val_ds, test_ds, train_size, val_size, test_size = _build_val_test_loaders(
             phase_name, main_data, sub_data, train_ratio, val_ratio, batch_size
         )
-        log_progress(f"[{phase_name}] Train: ~{train_size}, Val: {val_size}, Test: {test_size}")
+        log_progress(f"Train: ~{train_size}, Val: {val_size}, Test: {test_size}")
 
         train_ds = _build_train_loader_epoch(phase_name, main_data, sub_data, train_ratio, val_ratio, batch_size, epoch=0)
-        steps_per_epoch = len(train_ds)
+        steps_per_epoch = len(train_ds) // ACCUMULATION_STEPS
         total_steps = steps_per_epoch * num_epochs
 
     warmup_steps = total_steps // (5 * num_epochs)
@@ -115,6 +118,7 @@ def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_sa
 
     log_progress(f"Step-based LR: warmup={warmup_steps} steps, total={total_steps} steps")
 
+    scaler = GradScaler('cuda') if torch.cuda.is_available() else None
     criterion = nn.CrossEntropyLoss(reduction="none")
     best_val_loss = float("inf")
     global_step = 0
@@ -130,34 +134,48 @@ def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_sa
         train_loss = 0.0
         batch_count = 0
         total_batches = len(train_ds)
+        penalty = torch.tensor(0.0, device=device)
 
+        optimizer.zero_grad()
         for batch_idx, (X_batch, Y_batch, sample_weight, attention_mask) in enumerate(train_ds):
             X_batch = X_batch.to(device, non_blocking=True)
             Y_batch = Y_batch.to(device, non_blocking=True)
             sample_weight = sample_weight.to(device, non_blocking=True)
             attention_mask = attention_mask.to(device, non_blocking=True)
 
-            optimizer.zero_grad()
-            outputs = model(X_batch, attention_mask=attention_mask)
-            loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
+            with autocast(device_type='cuda', enabled=(scaler is not None)):
+                outputs = model(X_batch, attention_mask=attention_mask)
+                loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
+                num_valid_tokens = sample_weight.sum()
+                ce_loss = (loss_per_token * sample_weight.view(-1)).sum() / (num_valid_tokens + 1e-8)
 
-            num_valid_tokens = sample_weight.sum()
-            ce_loss = (loss_per_token * sample_weight.view(-1)).sum() / (num_valid_tokens + 1e-8)
+                if use_penalty:
+                    penalty = penalty_engine(logits=outputs, inputs=X_batch, targets=Y_batch, loss_mask=sample_weight)
+                    loss = ce_loss + penalty
+                else:
+                    loss = ce_loss
 
-            if use_penalty:
-                penalty = penalty_engine(logits=outputs, inputs=X_batch, targets=Y_batch, loss_mask=sample_weight)
-                loss = ce_loss + penalty
+            scaled_loss = loss / ACCUMULATION_STEPS
+            if scaler is not None:
+                scaler.scale(scaled_loss).backward()
             else:
-                loss = ce_loss
+                scaled_loss.backward()
 
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            scheduler.step()
+            if (batch_idx + 1) % ACCUMULATION_STEPS == 0 or (batch_idx + 1) == total_batches:
+                if scaler is not None:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                global_step += 1
 
             train_loss += loss.item()
             batch_count += 1
-            global_step += 1
             current_lr = optimizer.param_groups[0]["lr"]
 
             if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == total_batches:
@@ -170,6 +188,8 @@ def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_sa
                     f"- lr: {current_lr:.2e}",
                     end=""
                 )
+
+            del X_batch, Y_batch, outputs, loss, sample_weight, attention_mask
 
         print()
         train_loss /= len(train_ds)
@@ -189,7 +209,12 @@ def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_sa
                 loss = (loss_per_token * sample_weight.view(-1)).sum() / (num_valid_tokens + 1e-8)
                 val_loss += loss.item()
 
+                del X_batch, Y_batch, outputs, loss, sample_weight, attention_mask
+
         val_loss /= len(val_ds)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         log_progress(f"{phase_name} Epoch {epoch+1}/{num_epochs} | Train Loss: {train_loss:.4f} | Val Loss (CE only): {val_loss:.4f}")
 
         if val_loss < best_val_loss:
@@ -209,16 +234,18 @@ def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_sa
     test_loss = 0.0
     with torch.no_grad():
         for X_batch, Y_batch, sample_weight, attention_mask in test_ds:
-            X_batch = X_batch.to(device)
-            Y_batch = Y_batch.to(device)
-            sample_weight = sample_weight.to(device)
-            attention_mask = attention_mask.to(device)
+            X_batch = X_batch.to(device, non_blocking=True)
+            Y_batch = Y_batch.to(device, non_blocking=True)
+            sample_weight = sample_weight.to(device, non_blocking=True)
+            attention_mask = attention_mask.to(device, non_blocking=True)
 
             outputs = model(X_batch, attention_mask=attention_mask)
             loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
             num_valid_tokens = sample_weight.sum()
             loss = (loss_per_token * sample_weight.view(-1)).sum() / (num_valid_tokens + 1e-8)
             test_loss += loss.item()
+
+            del X_batch, Y_batch, outputs, loss, sample_weight, attention_mask
 
     test_loss /= len(test_ds)
     log_progress(f"{phase_name} Test Loss (CE only): {test_loss:.4f}")
@@ -275,7 +302,7 @@ if __name__ == "__main__":
         model_save_path=model_dir / "sft1.pt",
         train_ratio=train_ratio, val_ratio=val_ratio,
         batch_size=batch_size, phase_name="sft1",
-        penalty_engine=penalty_engine
+        penalty_engine=penalty_engine,
         resample_per_epoch=False
     )
 
