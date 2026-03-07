@@ -59,7 +59,6 @@ trainer = trainers.BpeTrainer(
 )
 
 tokenizer.train_from_iterator(dataset, trainer=trainer)
-
 tokenizer.save(str(processed_dir / "tokenizer.json"))
 
 vocab = tokenizer.get_vocab()
