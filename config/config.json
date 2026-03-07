@@ -2,7 +2,7 @@
     "vocab_size": 10000,
     "max_seq_len": 1024,
     "d_model": 512,
-    "num_heads": 4,
+    "num_heads": 8,
     "num_layers": 6,
     "ff_dim": 2048,
     "dropout": 0.05,
