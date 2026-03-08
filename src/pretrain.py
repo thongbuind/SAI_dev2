@@ -2,7 +2,6 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.amp import autocast, GradScaler
 import json
 import gc
 import sys
@@ -23,8 +22,6 @@ data_processed_dir = project_root / "data" / "processed"
 pretrain_tokenized_file = data_processed_dir / "pretrain_data_ids.npz"
 continued_pretrain_tokenized_file = data_processed_dir / "continued_pretrain_data_ids.npz"
 
-ACCUMULATION_STEPS = 4
-
 def pretrain(model, optimizer, device, pretrain_tokenized_file, num_epochs, model_folder, train_ratio, val_ratio, batch_size):
     print("╠════════════════════════════════════════════════════════════════════════════════════╣")
     print("║                            BẮT ĐẦU LOAD PRETRAIN DATA                              ║")
@@ -43,12 +40,11 @@ def pretrain(model, optimizer, device, pretrain_tokenized_file, num_epochs, mode
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    total_steps = len(train_ds) // ACCUMULATION_STEPS
+    total_steps = len(train_ds)
     warmup_steps = len(train_ds) // 5
     lr_lambda = get_step_lr_lambda(warmup_steps, total_steps)
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
-    scaler = GradScaler('cuda') if torch.cuda.is_available() else None
     criterion = nn.CrossEntropyLoss(reduction='none')
     best_val_loss = float('inf')
 
@@ -58,36 +54,26 @@ def pretrain(model, optimizer, device, pretrain_tokenized_file, num_epochs, mode
         batch_count = 0
         total_batches = len(train_ds)
         
-        optimizer.zero_grad()
         for batch_idx, (X_batch, Y_batch, sample_weight, attention_mask) in enumerate(train_ds):
             X_batch = X_batch.to(device, non_blocking=True)
             Y_batch = Y_batch.to(device, non_blocking=True)
             sample_weight = sample_weight.to(device, non_blocking=True)
             attention_mask = attention_mask.to(device, non_blocking=True)
             
-            with autocast(device_type='cuda', enabled=(scaler is not None)):
-                outputs = model(X_batch, attention_mask=attention_mask)
-                loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
-                num_valid_tokens = sample_weight.sum()
-                loss = (loss_per_token * sample_weight.view(-1)).sum() / (num_valid_tokens + 1e-8)
-
-            scaled_loss = loss / ACCUMULATION_STEPS
-            if scaler is not None:
-                scaler.scale(scaled_loss).backward()
-            else:
-                scaled_loss.backward()
-
-            if (batch_idx + 1) % ACCUMULATION_STEPS == 0 or (batch_idx + 1) == total_batches:
-                if scaler is not None:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
+            optimizer.zero_grad()
+            
+            outputs = model(X_batch, attention_mask=attention_mask)
+            loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
+            
+            num_valid_tokens = sample_weight.sum()
+            loss = (loss_per_token * sample_weight.view(-1)).sum() / (num_valid_tokens + 1e-8)
+            
+            loss.backward()
+            
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            optimizer.step()
+            scheduler.step()
             
             train_loss += loss.item()
             batch_count += 1
@@ -124,8 +110,6 @@ def pretrain(model, optimizer, device, pretrain_tokenized_file, num_epochs, mode
                 del X_batch, Y_batch, outputs, loss, sample_weight, attention_mask
         
         val_loss /= len(val_ds)
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
         
         log_progress(f"Epoch {epoch+1}/{num_epochs} Train Loss: {train_loss:.4f} Val Loss: {val_loss:.4f}")
         
@@ -145,10 +129,10 @@ def pretrain(model, optimizer, device, pretrain_tokenized_file, num_epochs, mode
     test_loss = 0.0
     with torch.no_grad():
         for X_batch, Y_batch, sample_weight, attention_mask in test_ds:
-            X_batch = X_batch.to(device, non_blocking=True)
-            Y_batch = Y_batch.to(device, non_blocking=True)
-            sample_weight = sample_weight.to(device, non_blocking=True)
-            attention_mask = attention_mask.to(device, non_blocking=True)
+            X_batch = X_batch.to(device)
+            Y_batch = Y_batch.to(device)
+            sample_weight = sample_weight.to(device)
+            attention_mask = attention_mask.to(device)
             
             outputs = model(X_batch, attention_mask=attention_mask)
             loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
@@ -183,12 +167,11 @@ def continued_pretrain(model, optimizer, device, continued_pretrain_tokenized_fi
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    total_steps = len(train_ds) // ACCUMULATION_STEPS
+    total_steps = len(train_ds)
     warmup_steps = len(train_ds) // 2
     lr_lambda = get_step_lr_lambda(warmup_steps, total_steps)
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    scaler = GradScaler('cuda') if torch.cuda.is_available() else None
     criterion = nn.CrossEntropyLoss(reduction='none')
     best_val_loss = float('inf')
 
@@ -198,36 +181,23 @@ def continued_pretrain(model, optimizer, device, continued_pretrain_tokenized_fi
         batch_count = 0
         total_batches = len(train_ds)
         
-        optimizer.zero_grad()
         for batch_idx, (X_batch, Y_batch, sample_weight, attention_mask) in enumerate(train_ds):
             X_batch = X_batch.to(device, non_blocking=True)
             Y_batch = Y_batch.to(device, non_blocking=True)
             sample_weight = sample_weight.to(device, non_blocking=True)
             attention_mask = attention_mask.to(device, non_blocking=True)
             
-            with autocast(device_type='cuda', enabled=(scaler is not None)):
-                outputs = model(X_batch, attention_mask=attention_mask)
-                loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
-                num_valid_tokens = sample_weight.sum()
-                loss = (loss_per_token * sample_weight.view(-1)).sum() / (num_valid_tokens + 1e-8)
-
-            scaled_loss = loss / ACCUMULATION_STEPS
-            if scaler is not None:
-                scaler.scale(scaled_loss).backward()
-            else:
-                scaled_loss.backward()
-
-            if (batch_idx + 1) % ACCUMULATION_STEPS == 0 or (batch_idx + 1) == total_batches:
-                if scaler is not None:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
+            optimizer.zero_grad()
+            outputs = model(X_batch, attention_mask=attention_mask)
+            
+            loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
+            num_valid_tokens = sample_weight.sum()
+            loss = (loss_per_token * sample_weight.view(-1)).sum() / (num_valid_tokens + 1e-8)
+            
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            scheduler.step()
             
             train_loss += loss.item()
             batch_count += 1
@@ -264,8 +234,6 @@ def continued_pretrain(model, optimizer, device, continued_pretrain_tokenized_fi
                 del X_batch, Y_batch, outputs, loss, sample_weight, attention_mask
         
         val_loss /= len(val_ds)
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
         
         log_progress(f"Epoch {epoch+1}/{num_epochs} Train Loss: {train_loss:.4f} Val Loss: {val_loss:.4f}")
         
@@ -285,10 +253,10 @@ def continued_pretrain(model, optimizer, device, continued_pretrain_tokenized_fi
     test_loss = 0.0
     with torch.no_grad():
         for X_batch, Y_batch, sample_weight, attention_mask in test_ds:
-            X_batch = X_batch.to(device, non_blocking=True)
-            Y_batch = Y_batch.to(device, non_blocking=True)
-            sample_weight = sample_weight.to(device, non_blocking=True)
-            attention_mask = attention_mask.to(device, non_blocking=True)
+            X_batch = X_batch.to(device)
+            Y_batch = Y_batch.to(device)
+            sample_weight = sample_weight.to(device)
+            attention_mask = attention_mask.to(device)
             
             outputs = model(X_batch, attention_mask=attention_mask)
             loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
