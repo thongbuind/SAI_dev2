@@ -25,7 +25,7 @@ def log_progress(text):
     formatted_text = f"║ {text:<{fixed_width}} ║"
     print(formatted_text)
 
-def render_chat_box(test_cases, models, generate_response, total_width=70, max_new_tokens=100, beam_size=5):
+def render_chat_box(test_cases, models, generate_response, total_width=70, max_new_tokens=200, beam_size=5):
     INNER_WIDTH = total_width - 2
     PADDING = 1
     CONTENT_WIDTH = INNER_WIDTH - PADDING * 2

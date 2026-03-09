@@ -41,19 +41,22 @@ EOS = vocab["[EOS]"]
 PAD = vocab["[PAD]"]
 
 def load_model(model_file):
-    """Load một model từ file checkpoint"""
     model = TransformerModel(vocab_size, d_model, num_heads, num_layers, ff_dim, max_seq_len, dropout)
     model.load_state_dict(torch.load(model_file, map_location=device))
     model.to(device)
     model.eval()
     return model
 
-print("\n📦 Đang load các models...")
 models = {
-    # "SFT1": {"model": load_model(sft1_file)},
+    "sft1": {"model": load_model(sft1_file)},
     "SAI": {"model": load_model(sft2_file)}
 }
 print(f"✅ Đã load {len(models)} models: {', '.join(models.keys())}")
+total_params = 0
+for param_name, param in models["sft1"]["model"].named_parameters():
+    total_params += param.numel()
+        
+print(f"👉 Tổng số tham số của model: {total_params:,}")
 
 def pad_sequence(sequence, max_len, padding_value=0):
     if len(sequence) >= max_len:
@@ -121,7 +124,7 @@ def pad_sequence(sequence, max_len, padding_value=0):
 #     return tokenizer.decode(output_tokens)
 
 
-def generate_response(model, user_input, max_new_tokens=100, beam_size=10, no_repeat_ngram_size=3, repetition_penalty=1.2):
+def generate_response(model, user_input, max_new_tokens=200, beam_size=10, no_repeat_ngram_size=3, repetition_penalty=1.2):
     model.eval()
     prompt = " Input: " + user_input
     prompt_ids = tokenizer.encode(prompt).ids
@@ -223,26 +226,38 @@ def generate_response(model, user_input, max_new_tokens=100, beam_size=10, no_re
 
 if __name__ == "__main__":
     test_cases = [
+        "Sửa các lỗi sai trong câu sau: hom nay tôi di học",
+        "Hãy viết câu trái nghĩa với câu sau: nam học rất kém",
+        "viết câu phủ định lại câu sau: anh ấy rất đẹp trai",
+        "viết lại câu sau: anh ấy nói: tớ thích cậu, cậu hẹn hò với tớ nhé",
+        "mở rộng ngữ cảnh câu sau: trời đang mưa",
+        "Đọc câu dưới đây, tìm lỗi sai (nếu có) và viết lại câu đúng: vì tuyết rơi nên trời rất nóng",
+        "tìm lỗi sai và sửa lại: vì nghèo nên anh ấy có rất nhiều tiền",
+        "Ghép hai vế sau thành một câu có nghĩa: không ăn được cay ; tôi thích ăn mì cay"
         # "chào",
         # "3+5 bằng mấy",
         # "9+8",
-        # "có đó không",
-        "max verstappen là ai",
+        # "hiện hồn lên đây",
+        # "formula 1 là gì",
+        # "cách làm bánh mì việt nam",
+        # "cho tôi thêm thông tin về đội đua f1 ferrari",
+        # "max verstappen là ai",
         # "ê sai",
-        "formula one là gì",
-        "đinh tiên hoàng đế có huý danh là gì",
-        "giỏi thế",
-        "tên thật của trần thái tổ là gì",
-        "trần nhân tông có tên thật là gì",
-        # "ê dậy đi",
-        # "miếu hiệu của lê lợi",
+        # "đinh tiên hoàng đế có huý danh là gì",
+        # "tên thật của trần thái tổ là gì",
+        # "trần nhân tông có tên thật là gì",
+        # "giỏi thế",
+        # "lê lợi có miếu hiệu là gì",
         # "huý danh của lê thái tông là gì",
-        # "lê thánh tông có huý là gì",
-        # "miếu hiệu của hoàng đế trần hoảng là gì",
+        # "ê dậy đi",
+        # "hoàng đế lê thánh tông có huý là gì",
+        # "miếu hiệu của trần hoảng là gì",
         # "hello sai",
-        "Việt Nam có món ăn nào ngon",
-        "cách nấu phở",
-        "oke cảm ơn"
+        # "ẩm thực việt nam",
+        # "cách nấu phở",
+        # "hướng dẫn cho tôi cách nấu cháo gà",
+        # "oke cảm ơn",
+        # "ừ, ổn rồi đấy"
     ]
 
     render_chat_box(test_cases, models, generate_response)
