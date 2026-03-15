@@ -119,6 +119,7 @@ def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_sa
     best_val_loss = float("inf")
     global_step = 0
     use_penalty = penalty_engine is not None and len(penalty_engine.rules) > 0
+    scaler = torch.amp.GradScaler('cuda', enabled=torch.cuda.is_available())
 
     for epoch in range(num_epochs):
 
@@ -131,33 +132,40 @@ def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_sa
         batch_count = 0
         total_batches = len(train_ds)
 
+        optimizer.zero_grad(set_to_none=True)
         for batch_idx, (X_batch, Y_batch, sample_weight, attention_mask) in enumerate(train_ds):
             X_batch = X_batch.to(device, non_blocking=True)
             Y_batch = Y_batch.to(device, non_blocking=True)
             sample_weight = sample_weight.to(device, non_blocking=True)
             attention_mask = attention_mask.to(device, non_blocking=True)
 
-            optimizer.zero_grad()
-            outputs = model(X_batch, attention_mask=attention_mask)
-            loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=torch.cuda.is_available()):
+                outputs = model(X_batch, attention_mask=attention_mask)
+                loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
 
-            num_valid_tokens = sample_weight.sum()
-            ce_loss = (loss_per_token * sample_weight.view(-1)).sum() / (num_valid_tokens + 1e-8)
+                num_valid_tokens = sample_weight.sum()
+                ce_loss = (loss_per_token * sample_weight.view(-1)).sum() / (num_valid_tokens + 1e-8)
 
-            if use_penalty:
-                penalty = penalty_engine(logits=outputs, inputs=X_batch, targets=Y_batch, loss_mask=sample_weight)
-                loss = ce_loss + penalty
-            else:
-                loss = ce_loss
+                if use_penalty:
+                    penalty = penalty_engine(logits=outputs, inputs=X_batch, targets=Y_batch, loss_mask=sample_weight)
+                    loss = ce_loss + penalty
+                else:
+                    loss = ce_loss
 
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            scheduler.step()
+            scaled_loss = loss / accumulation_steps
+            scaler.scale(scaled_loss).backward()
+
+            if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == total_batches:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+                scheduler.step()
+                global_step += 1
 
             train_loss += loss.item()
             batch_count += 1
-            global_step += 1
             current_lr = optimizer.param_groups[0]["lr"]
 
             if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == total_batches:
@@ -183,8 +191,9 @@ def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_sa
                 sample_weight = sample_weight.to(device, non_blocking=True)
                 attention_mask = attention_mask.to(device, non_blocking=True)
 
-                outputs = model(X_batch, attention_mask=attention_mask)
-                loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
+                with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=torch.cuda.is_available()):
+                    outputs = model(X_batch, attention_mask=attention_mask)
+                    loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
                 num_valid_tokens = sample_weight.sum()
                 loss = (loss_per_token * sample_weight.view(-1)).sum() / (num_valid_tokens + 1e-8)
                 val_loss += loss.item()
@@ -209,13 +218,14 @@ def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_sa
     test_loss = 0.0
     with torch.no_grad():
         for X_batch, Y_batch, sample_weight, attention_mask in test_ds:
-            X_batch = X_batch.to(device)
-            Y_batch = Y_batch.to(device)
-            sample_weight = sample_weight.to(device)
-            attention_mask = attention_mask.to(device)
+            X_batch = X_batch.to(device, non_blocking=True)
+            Y_batch = Y_batch.to(device, non_blocking=True)
+            sample_weight = sample_weight.to(device, non_blocking=True)
+            attention_mask = attention_mask.to(device, non_blocking=True)
 
-            outputs = model(X_batch, attention_mask=attention_mask)
-            loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=torch.cuda.is_available()):
+                outputs = model(X_batch, attention_mask=attention_mask)
+                loss_per_token = criterion(outputs.view(-1, outputs.size(-1)), Y_batch.view(-1))
             num_valid_tokens = sample_weight.sum()
             loss = (loss_per_token * sample_weight.view(-1)).sum() / (num_valid_tokens + 1e-8)
             test_loss += loss.item()
@@ -226,80 +236,79 @@ def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_sa
 
     return test_loss
 
-if __name__ == "__main__":
-    with open(config_file, "r") as f:
-        config = json.load(f)
+with open(config_file, "r") as f:
+    config = json.load(f)
 
-    vocab_size = config["vocab_size"]
-    max_seq_len = config["max_seq_len"]
-    d_model = config["d_model"]
-    num_heads = config["num_heads"]
-    num_layers = config["num_layers"]
-    ff_dim = config["ff_dim"]
-    dropout = config["dropout"]
-    sft1_epochs = config["sft1_epochs"]
-    sft2_epochs = config["sft2_epochs"]
-    batch_size = config["batch_size"]
-    train_ratio = config["train_ratio"]
-    val_ratio = config["val_ratio"]
-    sft1_learning_rate = config["sft1_learning_rate"]
-    sft1_learning_weight_decay = config["sft1_learning_weight_decay"]
-    sft2_learning_rate = config["sft2_learning_rate"]
-    sft2_learning_weight_decay = config["sft2_learning_weight_decay"]
-    penalty_engine = (PenaltyEngine()
-        .add_rule(WrongTokenMarginPenalty(weight=config["penalty_margin_weight"], detach_max=config["penalty_margin_detach_max"]))
-        .add_rule(WrongTokenEntropyPenalty(weight=config["penalty_entropy_weight"], min_entropy=config["penalty_entropy_min_entropy"]))
-        .add_rule(FocalOverconfidencePenalty(weight=config["penalty_focal_weight"], gamma=config["penalty_focal_gamma"]))
-    )
+vocab_size = config["vocab_size"]
+max_seq_len = config["max_seq_len"]
+d_model = config["d_model"]
+num_heads = config["num_heads"]
+num_layers = config["num_layers"]
+ff_dim = config["ff_dim"]
+dropout = config["dropout"]
+sft1_epochs = config["sft1_epochs"]
+sft2_epochs = config["sft2_epochs"]
+batch_size = config["batch_size"]
+train_ratio = config["train_ratio"]
+val_ratio = config["val_ratio"]
+sft1_learning_rate = config["sft1_learning_rate"]
+sft1_learning_weight_decay = config["sft1_learning_weight_decay"]
+sft2_learning_rate = config["sft2_learning_rate"]
+accumulation_steps = config["accumulation_steps"]
+sft2_learning_weight_decay = config["sft2_learning_weight_decay"]
+penalty_engine = (PenaltyEngine()
+    .add_rule(WrongTokenMarginPenalty(weight=config["penalty_margin_weight"], detach_max=config["penalty_margin_detach_max"]))
+    .add_rule(WrongTokenEntropyPenalty(weight=config["penalty_entropy_weight"], min_entropy=config["penalty_entropy_min_entropy"]))
+    .add_rule(FocalOverconfidencePenalty(weight=config["penalty_focal_weight"], gamma=config["penalty_focal_gamma"]))
+)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    log_progress(f"Sử dụng device: {device}")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+log_progress(f"Sử dụng device: {device}")
 
-    model = TransformerModel(vocab_size, d_model, num_heads, num_layers, ff_dim, max_seq_len, dropout).to(device)
+log_progress("Load model từ continued-pretrain...")
+model = TransformerModel(vocab_size, d_model, num_heads, num_layers, ff_dim, max_seq_len, dropout).to(device)
+model.load_state_dict(torch.load(model_dir / "pretrained.pt", map_location=device))
+model.to(device)
 
-    log_progress("Load model từ continued-pretrain...")
-    model.load_state_dict(torch.load(model_dir / "pretrained.pt", map_location=device))
-    model.to(device)
+freeze_layers(model, [0, 1, 2])
 
-    freeze_layers(model, [0, 1, 2])
+optimizer_sft1 = optim.AdamW(
+    filter(lambda p: p.requires_grad, model.parameters()),
+    lr=sft1_learning_rate,
+    weight_decay=sft1_learning_weight_decay
+)
 
-    optimizer_sft1 = optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=sft1_learning_rate,
-        weight_decay=sft1_learning_weight_decay
-    )
+test_loss_sft1 = finetune(
+    model, optimizer_sft1, device, SFT1_data_ids_file, sub_data=None,
+    num_epochs=sft1_epochs,
+    model_save_path=model_dir / "sft1.pt",
+    train_ratio=train_ratio, val_ratio=val_ratio,
+    batch_size=batch_size, phase_name="sft1",
+    penalty_engine=penalty_engine,
+    resample_per_epoch=False
+)
 
-    test_loss_sft1 = finetune(
-        model, optimizer_sft1, device, SFT1_data_ids_file, sub_data=None,
-        num_epochs=sft1_epochs,
-        model_save_path=model_dir / "sft1.pt",
-        train_ratio=train_ratio, val_ratio=val_ratio,
-        batch_size=batch_size, phase_name="sft1",
-        penalty_engine=penalty_engine,
-        resample_per_epoch=False
-    )
+model.load_state_dict(torch.load(model_dir / "sft1.pt", map_location=device))
 
-    model.load_state_dict(torch.load(model_dir / "sft1.pt", map_location=device))
+unfreeze_all_layers(model)
+freeze_layers(model, [0, 1, 2])
 
-    unfreeze_all_layers(model)
-    freeze_layers(model, [0, 1, 2])
+optimizer_sft2 = optim.AdamW(
+    filter(lambda p: p.requires_grad, model.parameters()),
+    lr=sft2_learning_rate,
+    weight_decay=sft2_learning_weight_decay
+)
 
-    optimizer_sft2 = optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=sft2_learning_rate,
-        weight_decay=sft2_learning_weight_decay
-    )
+test_loss_sft2 = finetune(
+    model, optimizer_sft2, device, SFT2_data_ids_file, SFT1_data_ids_file,
+    num_epochs=sft2_epochs,
+    model_save_path=model_dir / "sft2.pt",
+    train_ratio=train_ratio, val_ratio=val_ratio,
+    batch_size=batch_size, phase_name="sft2",
+    penalty_engine=penalty_engine,
+    resample_per_epoch=True,
+)
 
-    test_loss_sft2 = finetune(
-        model, optimizer_sft2, device, SFT2_data_ids_file, SFT1_data_ids_file,
-        num_epochs=sft2_epochs,
-        model_save_path=model_dir / "sft2.pt",
-        train_ratio=train_ratio, val_ratio=val_ratio,
-        batch_size=batch_size, phase_name="sft2",
-        penalty_engine=penalty_engine,
-        resample_per_epoch=True,
-    )
-
-    log_progress(f"SFT1 Test Loss: {test_loss_sft1:.4f}")
-    log_progress(f"SFT2 Test Loss: {test_loss_sft2:.4f}")
-    log_progress(f"Model cuối cùng lưu tại: {model_dir / 'sft2.pt'}")
+log_progress(f"SFT1 Test Loss: {test_loss_sft1:.4f}")
+log_progress(f"SFT2 Test Loss: {test_loss_sft2:.4f}")
+log_progress(f"Model cuối cùng lưu tại: {model_dir / 'sft2.pt'}")

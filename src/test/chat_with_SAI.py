@@ -13,7 +13,7 @@ from src.model import TransformerModel
 from src.utils.utils import render_chat_box
 
 config_file = project_root / "config" / "config.json"
-sft1_file = project_root / "model" / "sft1.pt"
+sft1_file = project_root / "model" / "sft1_curr.pt"
 sft2_file = project_root / "model" / "sft2.pt"
 data_dir = project_root / "data"
 
@@ -63,7 +63,7 @@ def pad_sequence(sequence, max_len, padding_value=0):
         return sequence[:max_len]
     return sequence + [padding_value] * (max_len - len(sequence))
 
-def generate_response_prev(model, user_input, max_new_tokens=50, beam_size=10):
+def generate_response_prev(model, user_input, max_new_tokens=50, beam_size=5):
     model.eval()
     prompt = " Input: " + user_input
     prompt_ids = tokenizer.encode(prompt).ids
@@ -85,14 +85,11 @@ def generate_response_prev(model, user_input, max_new_tokens=50, beam_size=10):
         batch_inputs = [pad_sequence(b["seq"], max_seq_len, padding_value=PAD) for b in active_beams]
         batch_tensor = torch.tensor(batch_inputs, dtype=torch.long, device=device)
 
-        with torch.no_grad():
+        with torch.inference_mode():
             logits_batch = model(batch_tensor)
 
         all_candidates = []
         for b_idx, beam in enumerate(active_beams):
-            cur_pos = len(beam["seq"]) - 1
-            logits = logits_batch[b_idx, cur_pos, :]
-            log_probs = torch.log_softmax(logits, dim=-1)
             log_probs = torch.clamp(log_probs, -1e9, 0.0)
 
             topk_log_probs, topk_tokens = torch.topk(log_probs, beam_size)
@@ -123,8 +120,7 @@ def generate_response_prev(model, user_input, max_new_tokens=50, beam_size=10):
 
     return tokenizer.decode(output_tokens)
 
-
-def generate_response(model, user_input, max_new_tokens=200, beam_size=10, no_repeat_ngram_size=3, repetition_penalty=1.2):
+def generate_response(model, user_input, max_new_tokens=200, beam_size=5, no_repeat_ngram_size=3, repetition_penalty=1.2):
     model.eval()
     prompt = " Input: " + user_input
     prompt_ids = tokenizer.encode(prompt).ids
@@ -167,11 +163,12 @@ def generate_response(model, user_input, max_new_tokens=200, beam_size=10, no_re
         active_beams = [b for b in beams if not b["done"]]
         if not active_beams:
             break
+        
+        max_len = max(len(b["seq"]) for b in active_beams)
+        batch_inputs = [pad_sequence(b["seq"], max_len, PAD) for b in active_beams]
+        batch_tensor = torch.as_tensor(batch_inputs, dtype=torch.long, device=device)
 
-        batch_inputs = [pad_sequence(b["seq"], max_seq_len, padding_value=PAD) for b in active_beams]
-        batch_tensor = torch.tensor(batch_inputs, dtype=torch.long, device=device)
-
-        with torch.no_grad():
+        with torch.inference_mode():
             logits_batch = model(batch_tensor)
 
         all_candidates = []
@@ -187,12 +184,13 @@ def generate_response(model, user_input, max_new_tokens=200, beam_size=10, no_re
             # Lấy danh sách token bị cấm (no_repeat_ngram)
             banned_tokens = get_banned_tokens(beam["seq"])
 
-            topk_log_probs, topk_tokens = torch.topk(log_probs, beam_size + len(banned_tokens))
+            topk_log_probs, topk_tokens = torch.topk(log_probs, beam_size * 3)
             count = 0
-            for log_p, token in zip(topk_log_probs.cpu().numpy(), topk_tokens.cpu().numpy()):
+            for log_p, token in zip(topk_log_probs, topk_tokens):
+                token = int(token.item())
+                log_p = float(log_p.item())
                 if count >= beam_size:
                     break
-                token = int(token)
 
                 # Bỏ qua token bị cấm
                 if token in banned_tokens:
@@ -217,11 +215,160 @@ def generate_response(model, user_input, max_new_tokens=200, beam_size=10, no_re
             break
 
     final_pool = completed_beams if completed_beams else beams
-    best_beam  = max(final_pool, key=normalized_score)
+    best_beam = max(final_pool, key=normalized_score)
     output_tokens = best_beam["seq"][output_start_idx:]
     while output_tokens and output_tokens[-1] in [EOS, PAD]:
         output_tokens.pop()
 
+    return tokenizer.decode(output_tokens)
+
+def generate_response_kvcache(model, user_input, max_new_tokens=200, beam_size=5, no_repeat_ngram_size=3, repetition_penalty=1.2):
+    model.eval()
+    prompt_ids = tokenizer.encode(" Input: " + user_input).ids
+    input_ids = [BOS, USER] + prompt_ids + [SAI]
+    output_start_idx = len(input_ids)
+
+    prompt_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
+    with torch.inference_mode():
+        x = model.token_embedding(prompt_tensor)
+        x = model.dropout_layer(x)
+        prompt_kv = []
+        for block in model.decoder_blocks:
+            attn_out, kv = block.mha.prefill(x)
+            x = block.layernorm1(x + block.dropout1(attn_out))
+            x = block.layernorm2(x + block.dropout2(block.ffn(x)))
+            prompt_kv.append(kv)
+        first_logits = model.final_layer(x)[0, -1, :]
+
+    first_lp = torch.clamp(torch.log_softmax(first_logits, dim=-1), -1e9, 0.0)
+    topk_lp, topk_tok = torch.topk(first_lp, beam_size)
+
+    seqs = [input_ids + [int(t)] for t in topk_tok.tolist()]
+    log_probs = topk_lp.tolist()
+    dones = [int(t) in [EOS, PAD] for t in topk_tok.tolist()]
+
+    kv_cache = [
+        (kv[0].expand(beam_size, -1, -1, -1).contiguous(),
+         kv[1].expand(beam_size, -1, -1, -1).contiguous())
+        for kv in prompt_kv
+    ]
+
+    completed_beams = []
+
+    def get_banned_tokens(seq):
+        banned = set()
+        if no_repeat_ngram_size > 0 and len(seq) >= no_repeat_ngram_size:
+            prefix = tuple(seq[-(no_repeat_ngram_size - 1):])
+            for i in range(len(seq) - no_repeat_ngram_size + 1):
+                if tuple(seq[i:i + no_repeat_ngram_size - 1]) == prefix:
+                    banned.add(seq[i + no_repeat_ngram_size - 1])
+        return banned
+
+    def apply_rep_penalty(lp_vec, seq):
+        lp_vec = lp_vec.clone()
+        for tid in set(seq):
+            if lp_vec[tid] < 0:
+                lp_vec[tid] *= repetition_penalty
+            else:
+                lp_vec[tid] /= repetition_penalty
+        return lp_vec
+
+    def norm_score(seq, lp):
+        return lp / max(len(seq) - output_start_idx, 1)
+
+    for _ in range(max_new_tokens - 1):
+        n_beams = len(seqs)
+
+        last_toks = torch.tensor(
+            [[seqs[i][-1]] for i in range(n_beams)],
+            dtype=torch.long, device=device
+        )
+
+        with torch.inference_mode():
+            x = model.token_embedding(last_toks)
+            x = model.dropout_layer(x)
+            new_kv_list = []
+            for l, block in enumerate(model.decoder_blocks):
+                attn_out, present_kv = block.mha.forward_with_cache(x, kv_cache[l])
+                x = block.layernorm1(x + block.dropout1(attn_out))
+                x = block.layernorm2(x + block.dropout2(block.ffn(x)))
+                new_kv_list.append((
+                    present_kv[0].contiguous(),
+                    present_kv[1].contiguous(),
+                ))
+            logits_batch = model.final_layer(x)[:, 0, :]
+
+        kv_cache = new_kv_list
+
+        all_candidates = []
+        for beam_i in range(n_beams):
+            if dones[beam_i]:
+                continue
+            lp_vec = torch.clamp(torch.log_softmax(logits_batch[beam_i], dim=-1), -1e9, 0.0)
+            lp_vec = apply_rep_penalty(lp_vec, seqs[beam_i])
+            banned = get_banned_tokens(seqs[beam_i])
+
+            topk_lp2, topk_toks2 = torch.topk(lp_vec, beam_size * 3)
+            count = 0
+            for lp2, tok2 in zip(topk_lp2.tolist(), topk_toks2.tolist()):
+                if count >= beam_size:
+                    break
+                tok2 = int(tok2)
+                if tok2 in banned:
+                    continue
+                new_seq = seqs[beam_i] + [tok2]
+                new_lp = log_probs[beam_i] + lp2
+                done = tok2 in [EOS, PAD] or len(new_seq) >= max_seq_len
+                all_candidates.append({
+                    "beam_src": beam_i,
+                    "seq": new_seq,
+                    "log_prob": new_lp,
+                    "done": done,
+                })
+                count += 1
+
+        if not all_candidates:
+            break
+
+        all_candidates.sort(key=lambda c: norm_score(c["seq"], c["log_prob"]), reverse=True)
+
+        kept = []
+        src_idxs = []
+        for cand in all_candidates:
+            if cand["done"]:
+                completed_beams.append(cand)
+            elif len(kept) < beam_size:
+                kept.append(cand)
+                src_idxs.append(cand["beam_src"])
+
+        if not kept:
+            break
+
+        if completed_beams:
+            best_completed = max(completed_beams, key=lambda c: norm_score(c["seq"], c["log_prob"]))
+            best_active = max(kept, key=lambda c: norm_score(c["seq"], c["log_prob"]))
+            if norm_score(best_completed["seq"], best_completed["log_prob"]) >= \
+               norm_score(best_active["seq"], best_active["log_prob"]):
+                break
+
+        src_t = torch.tensor(src_idxs, dtype=torch.long, device=device)
+        kv_cache = [
+            (kv_cache[l][0][src_t].contiguous(),
+             kv_cache[l][1][src_t].contiguous())
+            for l in range(len(model.decoder_blocks))
+        ]
+
+        seqs      = [c["seq"]      for c in kept]
+        log_probs = [c["log_prob"] for c in kept]
+        dones     = [False] * len(kept)
+
+    # ── 4. Kết quả ───────────────────────────────────────────────────────
+    remaining  = [{"seq": seqs[i], "log_prob": log_probs[i]} for i in range(len(seqs))]
+    final_pool = completed_beams if completed_beams else remaining
+    best = max(final_pool, key=lambda c: norm_score(c["seq"], c["log_prob"]))
+    output_tokens = best["seq"][output_start_idx:]
+    while output_tokens and output_tokens[-1] in [EOS, PAD]:
+        output_tokens.pop()
     return tokenizer.decode(output_tokens)
 
 # if __name__ == "__main__":

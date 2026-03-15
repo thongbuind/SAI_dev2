@@ -3,11 +3,6 @@ import numpy as np
 import gc
 from utils.utils import log_progress
 
-import torch
-import numpy as np
-import gc
-from utils.utils import log_progress
-
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, X, Y, lengths, indices, loss_masks=None):
         self.X = X
@@ -21,21 +16,13 @@ class Dataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         real_idx = self.indices[idx]
-        if self.loss_masks is not None:
-            return (
-                self.X[real_idx],
-                self.Y[real_idx],
-                self.lengths[real_idx],
-                real_idx  # Trả về index để collate_fn lấy loss_mask
-            )
-        else:
-            return (
-                self.X[real_idx],
-                self.Y[real_idx],
-                self.lengths[real_idx],
-                real_idx
-            )
-
+        return (
+            self.X[real_idx],
+            self.Y[real_idx],
+            self.lengths[real_idx],
+            self.loss_masks[real_idx] if self.loss_masks is not None else None
+        )
+    
     @classmethod
     def create_dataloader(cls, X, Y, lengths, batch_size, shuffle, loss_masks=None):
         log_progress(f"Đang tạo dataset từ {len(X)} samples...")
@@ -88,9 +75,9 @@ class Dataset(torch.utils.data.Dataset):
             batch_size=batch_size,
             shuffle=shuffle,
             collate_fn=collate_fn,
-            num_workers=1,
+            num_workers=2,
             pin_memory=torch.cuda.is_available(),
-            persistent_workers=False,
+            persistent_workers = True,
             drop_last=False
         )
 
