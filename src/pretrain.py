@@ -6,9 +6,14 @@ from torch.amp import autocast, GradScaler
 import json
 import gc
 import sys
+import argparse
 from utils.utils import get_step_lr_lambda, log_progress
 from utils.Dataset import Dataset, split_train_val_test, load_data
 from model import TransformerModel
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--model", type=str, required=True, help="Model size: 35M or 100M")
+args = parser.parse_args()
 
 current_file = Path(__file__).resolve()
 project_root = current_file.parent.parent
@@ -17,7 +22,8 @@ config_dir = project_root / "config"
 data_dir = project_root / "data"
 model_dir = project_root / "model"
 src_dir = project_root / "src"
-config_file = config_dir / "config.json"
+base_config_file = config_dir / "base.json"
+model_config_file = config_dir / f"{args.model}.json"
 model_dir.mkdir(parents=True, exist_ok=True)
 data_processed_dir = project_root / "data" / "processed"
 pretrain_tokenized_file = data_processed_dir / "pretrain_data_ids.npz"
@@ -25,7 +31,7 @@ continued_pretrain_tokenized_file = data_processed_dir / "continued_pretrain_dat
 
 def train_loop(data_type, tokenized_file, epochs, learning_rate, weight_decay, extra_file=None):
     print("╠════════════════════════════════════════════════════════════════════════════════════╣")
-    print("║                                BẮT ĐẦU LOAD DATA                                   ║")
+    print("║                                BAT ĐAU LOAD DATA                                   ║")
     print("╠════════════════════════════════════════════════════════════════════════════════════╣")
 
     if extra_file is None:
@@ -184,8 +190,10 @@ def train_loop(data_type, tokenized_file, epochs, learning_rate, weight_decay, e
 
     return test_loss
 
-with open(config_file, 'r') as f:
+with open(base_config_file, 'r') as f:
     config = json.load(f)
+with open(model_config_file, 'r') as f:
+    config.update(json.load(f))
     
 vocab_size = config['vocab_size']
 max_seq_len = config['max_seq_len']

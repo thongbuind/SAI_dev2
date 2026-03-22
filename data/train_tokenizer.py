@@ -5,8 +5,9 @@ from tokenizers.normalizers import Lowercase, Sequence
 from tokenizers.pre_tokenizers import Whitespace
 
 current_file = Path(__file__).resolve()
-data_dir = current_file.parent
-config_file = data_dir.parent / "config" / "config.json"
+project_root = current_file.parent.parent
+config_file = project_root / "config" / "base.json"
+data_dir = project_root / "data"
 raw_dir = data_dir / "raw"
 
 with open(config_file, 'r', encoding='utf-8') as f:

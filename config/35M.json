@@ -1,0 +1,7 @@
+{
+    "d_model": 512,
+    "num_heads": 8,
+    "num_layers": 8,
+    "ff_dim": 2048,
+    "batch_size": 24
+}

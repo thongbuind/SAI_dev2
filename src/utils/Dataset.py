@@ -75,7 +75,7 @@ class Dataset(torch.utils.data.Dataset):
             batch_size=batch_size,
             shuffle=shuffle,
             collate_fn=collate_fn,
-            num_workers=2,
+            num_workers=4,
             pin_memory=torch.cuda.is_available(),
             persistent_workers = True,
             drop_last=False

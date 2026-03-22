@@ -5,10 +5,15 @@ import torch.optim as optim
 import json
 import gc
 import sys
+import argparse
 from utils.utils import get_step_lr_lambda, freeze_layers, unfreeze_all_layers, log_progress
 from utils.Dataset import Dataset, split_train_val_test, load_data
 from PenaltyEngine import PenaltyEngine, WrongTokenMarginPenalty, WrongTokenEntropyPenalty, FocalOverconfidencePenalty
 from model import TransformerModel
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--model", type=str, required=True, help="Model size: 35M or 100M")
+args = parser.parse_args()
 
 current_file = Path(__file__).resolve()
 project_root = current_file.parent.parent
@@ -17,7 +22,8 @@ config_dir = project_root / "config"
 data_dir = project_root / "data"
 model_dir = project_root / "model"
 src_dir = project_root / "src"
-config_file = config_dir / "config.json"
+base_config_file = config_dir / "base.json"
+model_config_file = config_dir / f"{args.model}.json"
 model_dir.mkdir(parents=True, exist_ok=True)
 data_processed_dir = project_root / "data" / "processed"
 SFT1_data_ids_file = data_processed_dir / "SFT1_data_ids.npz"
@@ -236,8 +242,11 @@ def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_sa
 
     return test_loss
 
-with open(config_file, "r") as f:
+with open(base_config_file, 'r') as f:
     config = json.load(f)
+with open(model_config_file, 'r') as f:
+    config.update(json.load(f))
+    
 
 vocab_size = config["vocab_size"]
 max_seq_len = config["max_seq_len"]
@@ -270,7 +279,7 @@ model = TransformerModel(vocab_size, d_model, num_heads, num_layers, ff_dim, max
 model.load_state_dict(torch.load(model_dir / "pretrained.pt", map_location=device))
 model.to(device)
 
-freeze_layers(model, [0, 1, 2])
+freeze_layers(model, [0, 1, 2, 3, 4, 5])
 
 optimizer_sft1 = optim.AdamW(
     filter(lambda p: p.requires_grad, model.parameters()),
@@ -291,7 +300,7 @@ test_loss_sft1 = finetune(
 model.load_state_dict(torch.load(model_dir / "sft1.pt", map_location=device))
 
 unfreeze_all_layers(model)
-freeze_layers(model, [0, 1, 2])
+freeze_layers(model, [0, 1, 2, 3, 4, 5])
 
 optimizer_sft2 = optim.AdamW(
     filter(lambda p: p.requires_grad, model.parameters()),

@@ -4,8 +4,9 @@ from pathlib import Path
 from tokenizers import Tokenizer
 
 current_file = Path(__file__).resolve()
-data_dir = current_file.parent
-config_file = data_dir.parent / "config" / "config.json"
+project_root = current_file.parent.parent
+config_file = project_root / "config" / "base.json"
+data_dir = project_root / "data"
 raw_dir = data_dir / "raw"
 processed_dir = data_dir / "processed"
 processed_dir.mkdir(parents=True, exist_ok=True)
@@ -67,14 +68,15 @@ def build_dataset(texts, tokenizer, vocab, max_seq_len):
         lengths.append(len(tokens) + 1)
     return X, Y, lengths
 
-# pretrain_texts = load_text_jsonl(raw_dir / "pretrain_data.jsonl")
-# X, Y, lengths = build_dataset(pretrain_texts, tokenizer, vocab, max_seq_len)
-# print(f"✅ Pretrain: {len(X)} samples | Tổng số token: {sum(lengths):,}")
-# np.savez_compressed(processed_dir / "pretrain_data_ids.npz", X=np.array(X, dtype=object), Y=np.array(Y, dtype=object), lengths=np.array(lengths))
+pretrain_texts = load_text_jsonl(raw_dir / "pretrain_data.jsonl")
+X, Y, lengths = build_dataset(pretrain_texts, tokenizer, vocab, max_seq_len)
+print(f"✅ Pretrain: {len(X)} samples | Tổng số token: {sum(lengths):,}")
+np.savez_compressed(processed_dir / "pretrain_data_ids.npz", X=np.array(X, dtype=object), Y=np.array(Y, dtype=object), lengths=np.array(lengths))
 
-# continued_texts = load_text_jsonl(raw_dir / "continued_pretrain_data.jsonl")
-# X, Y, lengths = build_dataset(continued_texts, tokenizer, vocab, max_seq_len)
-# np.savez_compressed(processed_dir / "continued_pretrain_data_ids.npz", X=np.array(X, dtype=object), Y=np.array(Y, dtype=object), lengths=np.array(lengths))
+continued_texts = load_text_jsonl(raw_dir / "continued_pretrain_data.jsonl")
+X, Y, lengths = build_dataset(continued_texts, tokenizer, vocab, max_seq_len)
+print(f"✅ Continued Pretrain: {len(X)} samples | Tổng số token: {sum(lengths):,}")
+np.savez_compressed(processed_dir / "continued_pretrain_data_ids.npz", X=np.array(X, dtype=object), Y=np.array(Y, dtype=object), lengths=np.array(lengths))
 
 USER = vocab["<|user|>"]
 SAI = vocab["<|s.a.i|>"]
@@ -136,7 +138,7 @@ np.savez_compressed(
     loss_mask=np.array(loss_mask_sft1, dtype=object),
     lengths=np.array(lengths_sft1, dtype=np.int32)
 )
-print(f"✅ Đã lưu SFT1: {len(X_sft1)} samples")
+print(f"✅ Đã lưu SFT1: {len(X_sft1)} samples | Tổng số token: {sum(lengths_sft1):,}")
 
 sft2_dataset = load_sft_jsonl("SFT_2.jsonl")
 X_sft2, Y_sft2, loss_mask_sft2, lengths_sft2 = process_sft_data(sft2_dataset)
@@ -148,4 +150,4 @@ np.savez_compressed(
     loss_mask=np.array(loss_mask_sft2, dtype=object),
     lengths=np.array(lengths_sft2, dtype=np.int32)
 )
-print(f"✅ Đã lưu SFT2: {len(X_sft2)} samples")
+print(f"✅ Đã lưu SFT2: {len(X_sft2)} samples | Tổng số token: {sum(lengths_sft2):,}")
