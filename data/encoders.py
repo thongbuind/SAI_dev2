@@ -87,7 +87,7 @@ def process_sft_data(dataset):
     X, Y, loss_mask, lengths = [], [], [], []
     
     for idx, sample in enumerate(dataset):
-        if idx % 10000 == 0:
+        if idx % 100000 == 0:
             print(f"📄 Đang xử lý dòng {idx}/{len(dataset)}...")
 
         if sample["input"]:
@@ -105,14 +105,7 @@ def process_sft_data(dataset):
 
         target_ids = input_ids[1:]
 
-        if len(output_ids) == 1:
-            output_weight = 30
-        elif len(output_ids) <= 5:
-            output_weight = 10
-        # elif len(output_ids) < 10:
-        #     output_weight = 3
-        else:
-            output_weight = 1
+        output_weight = 1
 
         mask = (
             [0] * (1 + len(prompt_ids) + 1) +

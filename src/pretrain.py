@@ -29,7 +29,7 @@ data_processed_dir = project_root / "data" / "processed"
 pretrain_tokenized_file = data_processed_dir / "pretrain_data_ids.npz"
 continued_pretrain_tokenized_file = data_processed_dir / "continued_pretrain_data_ids.npz"
 
-def train_loop(data_type, tokenized_file, epochs, learning_rate, weight_decay, extra_file=None):
+def train_loop(data_type, tokenized_file, epochs, learning_rate, weight_decay, num_workers, extra_file=None):
     print("╠════════════════════════════════════════════════════════════════════════════════════╣")
     print("║                                BAT ĐAU LOAD DATA                                   ║")
     print("╠════════════════════════════════════════════════════════════════════════════════════╣")
@@ -42,9 +42,9 @@ def train_loop(data_type, tokenized_file, epochs, learning_rate, weight_decay, e
     X_train, Y_train, _, lengths_train, X_val, Y_val, _, lengths_val, X_test, Y_test, _, lengths_test = split_train_val_test(X, Y, None, lengths, train_ratio, val_ratio)
     log_progress(f"Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
 
-    train_ds = Dataset.create_dataloader(X_train, Y_train, lengths_train, batch_size, shuffle=True)
-    val_ds = Dataset.create_dataloader(X_val, Y_val, lengths_val, batch_size, shuffle=False)
-    test_ds = Dataset.create_dataloader(X_test, Y_test, lengths_test, batch_size, shuffle=False)
+    train_ds = Dataset.create_dataloader(X_train, Y_train, lengths_train, batch_size, num_workers, shuffle=True)
+    val_ds = Dataset.create_dataloader(X_val, Y_val, lengths_val, batch_size, num_workers, shuffle=False)
+    test_ds = Dataset.create_dataloader(X_test, Y_test, lengths_test, batch_size, num_workers, shuffle=False)
 
     del X_train, Y_train, lengths_train, X_val, Y_val, lengths_val, X_test, Y_test, lengths_test
     gc.collect()
@@ -53,7 +53,7 @@ def train_loop(data_type, tokenized_file, epochs, learning_rate, weight_decay, e
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     total_steps = (len(train_ds) // accumulation_steps) * epochs
-    warmup_steps = len(train_ds) // 5
+    warmup_steps = len(train_ds) // 4
 
     lr_lambda = get_step_lr_lambda(warmup_steps, total_steps)
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
@@ -212,6 +212,7 @@ continued_pretrain_learning_rate = config['continued_pretrain_learning_rate']
 accumulation_steps = config['accumulation_steps']
 pretrain_weight_decay = config['pretrain_weight_decay']
 continued_pretrain_weight_decay = config['continued_pretrain_weight_decay']
+num_workers = config['num_workers']
 
 if torch.cuda.is_available():
     device = torch.device("cuda")
@@ -232,7 +233,8 @@ pretrain_test_loss = train_loop(
     tokenized_file=pretrain_tokenized_file,
     epochs=pretrain_epochs,
     learning_rate=pretrain_learning_rate,
-    weight_decay=pretrain_weight_decay
+    weight_decay=pretrain_weight_decay,
+    num_workers=num_workers
 )
 
 log_progress("Đang load best model từ pretrain để tiếp tục training...")

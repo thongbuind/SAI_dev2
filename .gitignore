@@ -19,12 +19,8 @@ data/processed/SFT1_data_ids.npz
 data/processed/SFT2_data_ids.npz
 data/raw/
 
-
-data/history/
-data/tao_cau/
-
 model/
 
-test/
+src/test/
 
 web/

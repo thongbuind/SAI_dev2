@@ -24,7 +24,7 @@ class Dataset(torch.utils.data.Dataset):
         )
     
     @classmethod
-    def create_dataloader(cls, X, Y, lengths, batch_size, shuffle, loss_masks=None):
+    def create_dataloader(cls, X, Y, lengths, batch_size, num_workers, shuffle, loss_masks=None):
         log_progress(f"Đang tạo dataset từ {len(X)} samples...")
         indices = np.arange(len(X))
         dataset = cls(X, Y, lengths, indices, loss_masks)
@@ -75,7 +75,7 @@ class Dataset(torch.utils.data.Dataset):
             batch_size=batch_size,
             shuffle=shuffle,
             collate_fn=collate_fn,
-            num_workers=4,
+            num_workers=num_workers,
             pin_memory=torch.cuda.is_available(),
             persistent_workers = True,
             drop_last=False

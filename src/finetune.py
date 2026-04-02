@@ -34,7 +34,7 @@ data_processed_dir = project_root / "data" / "processed"
 SFT1_data_ids_file = data_processed_dir / "SFT1_data_ids.npz"
 SFT2_data_ids_file = data_processed_dir / "SFT2_data_ids.npz"
 
-def _build_val_test_loaders(phase_name, main_data, sub_data, train_ratio, val_ratio, batch_size):
+def _build_val_test_loaders(phase_name, main_data, sub_data, train_ratio, val_ratio, batch_size, num_workers):
     X, Y, loss_mask, lengths = load_data(phase_name, main_data, sub_data)
 
     X_train, Y_train, mask_train, len_train, \
@@ -43,8 +43,8 @@ def _build_val_test_loaders(phase_name, main_data, sub_data, train_ratio, val_ra
         X, Y, loss_mask, lengths, train_ratio, val_ratio
     )
 
-    val_ds = Dataset.create_dataloader(X_val, Y_val, len_val, batch_size, shuffle=False, loss_masks=mask_val)
-    test_ds = Dataset.create_dataloader(X_test, Y_test, len_test, batch_size, shuffle=False, loss_masks=mask_test)
+    val_ds = Dataset.create_dataloader(X_val, Y_val, len_val, batch_size, num_workers, shuffle=False, loss_masks=mask_val)
+    test_ds = Dataset.create_dataloader(X_test, Y_test, len_test, batch_size, num_workers, shuffle=False, loss_masks=mask_test)
 
     train_size = len(X_train)
     val_size = len(X_val)
@@ -60,7 +60,7 @@ def _build_val_test_loaders(phase_name, main_data, sub_data, train_ratio, val_ra
 
     return val_ds, test_ds, train_size, val_size, test_size
 
-def _build_train_loader_epoch(phase_name, main_data, sub_data, train_ratio, val_ratio, batch_size, epoch=0):
+def _build_train_loader_epoch(phase_name, main_data, sub_data, train_ratio, val_ratio, batch_size, num_workers, epoch=0):
     X, Y, loss_mask, lengths = load_data(phase_name, main_data, sub_data, seed=epoch)
 
     X_train, Y_train, mask_train, len_train, \
@@ -69,7 +69,7 @@ def _build_train_loader_epoch(phase_name, main_data, sub_data, train_ratio, val_
         X, Y, loss_mask, lengths, train_ratio, val_ratio
     )
 
-    train_ds = Dataset.create_dataloader(X_train, Y_train, len_train, batch_size, shuffle=True, loss_masks=mask_train)
+    train_ds = Dataset.create_dataloader(X_train, Y_train, len_train, batch_size, num_workers, shuffle=True, loss_masks=mask_train)
 
     del X_val, Y_val, mask_val, len_val
     del X_test, Y_test, mask_test, len_test
@@ -81,7 +81,7 @@ def _build_train_loader_epoch(phase_name, main_data, sub_data, train_ratio, val_
 
     return train_ds
 
-def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_save_path, train_ratio, val_ratio, batch_size, phase_name, penalty_engine, resample_per_epoch=False, resume_checkpoint_path: Path = None):
+def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_save_path, train_ratio, val_ratio, batch_size, num_workers, phase_name, penalty_engine, resample_per_epoch=False, resume_checkpoint_path: Path = None):
     print(f"╠════════════════════════════════════════════════════════════════════════════════════╣")
     print(f"║                               BẮT ĐẦU LOAD {phase_name.upper():<4} DATA                               ║")
     print(f"╠════════════════════════════════════════════════════════════════════════════════════╣")
@@ -97,9 +97,9 @@ def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_sa
 
         log_progress(f"[{phase_name}] Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
 
-        train_ds = Dataset.create_dataloader(X_train, Y_train, len_train, batch_size, shuffle=True, loss_masks=mask_train)
-        val_ds = Dataset.create_dataloader(X_val, Y_val, len_val, batch_size, shuffle=False, loss_masks=mask_val)
-        test_ds = Dataset.create_dataloader(X_test, Y_test, len_test, batch_size, shuffle=False, loss_masks=mask_test)
+        train_ds = Dataset.create_dataloader(X_train, Y_train, len_train, batch_size, num_workers, shuffle=True, loss_masks=mask_train)
+        val_ds = Dataset.create_dataloader(X_val, Y_val, len_val, batch_size, num_workers, shuffle=False, loss_masks=mask_val)
+        test_ds = Dataset.create_dataloader(X_test, Y_test, len_test, batch_size, num_workers, shuffle=False, loss_masks=mask_test)
 
         del X_train, Y_train, mask_train, len_train
         del X_val, Y_val, mask_val, len_val
@@ -112,11 +112,11 @@ def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_sa
 
     else:
         val_ds, test_ds, train_size, val_size, test_size = _build_val_test_loaders(
-            phase_name, main_data, sub_data, train_ratio, val_ratio, batch_size
+            phase_name, main_data, sub_data, train_ratio, val_ratio, batch_size, num_workers
         )
         log_progress(f"[{phase_name}] Train: ~{train_size}, Val: {val_size}, Test: {test_size}")
 
-        train_ds = _build_train_loader_epoch(phase_name, main_data, sub_data, train_ratio, val_ratio, batch_size, epoch=0)
+        train_ds = _build_train_loader_epoch(phase_name, main_data, sub_data, train_ratio, val_ratio, batch_size, num_workers, epoch=0)
         steps_per_epoch = len(train_ds)
         total_steps = steps_per_epoch * num_epochs
 
@@ -146,7 +146,7 @@ def finetune(model, optimizer, device, main_data, sub_data, num_epochs, model_sa
         if resample_per_epoch and epoch > 0:
             log_progress(f"[{phase_name}] Epoch {epoch+1}: Re-sampling train data...")
             train_ds = _build_train_loader_epoch(
-                phase_name, main_data, sub_data, train_ratio, val_ratio, batch_size, epoch
+                phase_name, main_data, sub_data, train_ratio, val_ratio, batch_size, num_workers, epoch
             )
 
         model.train()
@@ -287,6 +287,7 @@ sft2_learning_rate = config["sft2_learning_rate"]
 accumulation_steps = config["accumulation_steps"]
 sft2_learning_weight_decay = config["sft2_learning_weight_decay"]
 freeze = config["freeze"]
+num_workers = config["num_workers"]
 penalty_engine = (PenaltyEngine()
     .add_rule(WrongTokenMarginPenalty(weight=config["penalty_margin_weight"], detach_max=config["penalty_margin_detach_max"]))
     .add_rule(WrongTokenEntropyPenalty(weight=config["penalty_entropy_weight"], min_entropy=config["penalty_entropy_min_entropy"]))
@@ -315,6 +316,7 @@ if phase == "sft1":
         model_save_path=model_dir / "sft1.pt",
         train_ratio=train_ratio, val_ratio=val_ratio,
         batch_size=batch_size, phase_name="sft1",
+        num_workers=num_workers,
         penalty_engine=penalty_engine,
         resample_per_epoch=False,
         resume_checkpoint_path=None,
@@ -336,6 +338,7 @@ elif phase == "sft1_resume":
         model_save_path=model_dir / "sft1.pt",
         train_ratio=train_ratio, val_ratio=val_ratio,
         batch_size=batch_size, phase_name="sft1",
+        num_workers=num_workers,
         penalty_engine=penalty_engine,
         resample_per_epoch=False,
         resume_checkpoint_path=model_dir / "sft1.ckpt.pt",
@@ -359,6 +362,7 @@ elif phase == "sft2":
         model_save_path=model_dir / "sft2.pt",
         train_ratio=train_ratio, val_ratio=val_ratio,
         batch_size=batch_size, phase_name="sft2",
+        num_workers=num_workers,
         penalty_engine=penalty_engine,
         resample_per_epoch=True,
         resume_checkpoint_path=None,
@@ -381,6 +385,7 @@ elif phase == "sft2_resume":
         model_save_path=model_dir / "sft2.pt",
         train_ratio=train_ratio, val_ratio=val_ratio,
         batch_size=batch_size, phase_name="sft2",
+        num_workers=num_workers,
         penalty_engine=penalty_engine,
         resample_per_epoch=True,
         resume_checkpoint_path=model_dir / "sft2.ckpt.pt",

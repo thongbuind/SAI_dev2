@@ -16,38 +16,24 @@ class RotaryPositionalEmbedding(nn.Module):
         position = torch.arange(max_seq_len, dtype=torch.float32)
         freqs = torch.einsum('i,j->ij', position, inv_freq)
 
-        cos_freqs = torch.cos(freqs)
-        sin_freqs = torch.sin(freqs)
+        self.register_buffer('cos_cached', torch.cos(freqs))
+        self.register_buffer('sin_cached', torch.sin(freqs))
 
-        cos_freqs = torch.repeat_interleave(cos_freqs, 2, dim=-1)
-        sin_freqs = torch.repeat_interleave(sin_freqs, 2, dim=-1)
+    def apply_rope(self, x, positions):
+        cos = self.cos_cached[positions]
+        sin = self.sin_cached[positions]
 
-        self.register_buffer('cos_cached', cos_freqs)
-        self.register_buffer('sin_cached', sin_freqs)
+        cos = cos.unsqueeze(0).unsqueeze(0)
+        sin = sin.unsqueeze(0).unsqueeze(0)
 
-    def forward(self, seq_len):
-        cos_freqs = self.cos_cached[:seq_len, :]
-        sin_freqs = self.sin_cached[:seq_len, :]
-
-        cos_freqs = cos_freqs.unsqueeze(0)
-        sin_freqs = sin_freqs.unsqueeze(0)
-
-        return cos_freqs, sin_freqs
-
-    def apply_rope(self, x, cos_freqs, sin_freqs):
         x_even = x[..., ::2]
-        x_odd = x[..., 1::2]
+        x_odd  = x[..., 1::2]
 
-        cos_half = cos_freqs[..., ::2]
-        sin_half = sin_freqs[..., ::2]
+        rotated_even = x_even * cos - x_odd * sin
+        rotated_odd  = x_even * sin + x_odd * cos
 
-        rotated_x_even = x_even * cos_half - x_odd * sin_half
-        rotated_x_odd = x_even * sin_half + x_odd * cos_half
-
-        rotated_x = torch.stack([rotated_x_even, rotated_x_odd], dim=-1)
-        rotated_x = rotated_x.reshape(x.shape)
-
-        return rotated_x
+        rotated = torch.stack([rotated_even, rotated_odd], dim=-1)
+        return rotated.reshape(x.shape)
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, d_model, num_heads, max_seq_len, dropout_rate):
@@ -66,101 +52,78 @@ class MultiHeadAttention(nn.Module):
 
         self.rope = RotaryPositionalEmbedding(self.d_k, max_seq_len)
 
-        mask = torch.tril(torch.ones(max_seq_len, max_seq_len))
-        mask = torch.where(mask == 0, torch.tensor(-1e9), torch.tensor(0.0))
+        mask = torch.triu(torch.ones(max_seq_len, max_seq_len), diagonal=1).bool()
         self.register_buffer('causal_mask', mask)
 
     def forward(self, x, pad_mask=None):
         batch_size, seq_len, _ = x.shape
 
-        q = self.wq(x)
-        k = self.wk(x)
-        v = self.wv(x)
+        q = self.wq(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        k = self.wk(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        v = self.wv(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
 
-        q = q.view(batch_size, seq_len, self.num_heads, self.d_k)
-        k = k.view(batch_size, seq_len, self.num_heads, self.d_k)
-        v = v.view(batch_size, seq_len, self.num_heads, self.d_k)
+        positions = torch.arange(seq_len, device=x.device)
+        q = self.rope.apply_rope(q, positions)
+        k = self.rope.apply_rope(k, positions)
 
-        cos_freqs, sin_freqs = self.rope(seq_len)
-        cos_freqs = cos_freqs.view(1, seq_len, 1, self.d_k)
-        sin_freqs = sin_freqs.view(1, seq_len, 1, self.d_k)
+        attn_mask = self.causal_mask[:seq_len, :seq_len].view(1, 1, seq_len, seq_len)
+        if pad_mask is not None:
+            key_mask = ~pad_mask.unsqueeze(1).unsqueeze(2)
+            attn_mask = attn_mask | key_mask
 
-        q = self.rope.apply_rope(q, cos_freqs, sin_freqs)
-        k = self.rope.apply_rope(k, cos_freqs, sin_freqs)
-
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        scores = torch.matmul(q, k.transpose(-2, -1)) / torch.sqrt(
-            torch.tensor(self.d_k, dtype=torch.float32)
+        dropout_p = self.dropout_rate if self.training else 0.0
+        out = functional.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attn_mask,
+            dropout_p=dropout_p,
         )
 
-        causal_mask = self.causal_mask[:seq_len, :seq_len]
-        scores = scores + causal_mask
-
-        if pad_mask is not None:
-            pad_mask = pad_mask.float().unsqueeze(1).unsqueeze(2)
-            scores = scores + (1.0 - pad_mask) * -1e9
-
-        attention_weights = functional.softmax(scores, dim=-1)
-
-        if self.training and self.dropout_rate > 0:
-            attention_weights = functional.dropout(attention_weights, p=self.dropout_rate)
-
-        attention_output = torch.matmul(attention_weights, v)
-        attention_output = attention_output.transpose(1, 2)
-        attention_output = attention_output.contiguous().view(batch_size, seq_len, self.d_model)
-
-        return self.wo(attention_output)
+        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
+        return self.wo(out)
 
     def prefill(self, x):
         batch_size, seq_len, _ = x.shape
 
-        q = self.wq(x).view(batch_size, seq_len, self.num_heads, self.d_k)
-        k = self.wk(x).view(batch_size, seq_len, self.num_heads, self.d_k)
-        v = self.wv(x).view(batch_size, seq_len, self.num_heads, self.d_k)
+        assert seq_len <= self.max_seq_len, (
+            f"prefill seq_len ({seq_len}) vượt max_seq_len ({self.max_seq_len})"
+        )
 
-        cos_freqs, sin_freqs = self.rope(seq_len)
-        cos_freqs = cos_freqs.view(1, seq_len, 1, self.d_k)
-        sin_freqs = sin_freqs.view(1, seq_len, 1, self.d_k)
+        q = self.wq(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        k = self.wk(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        v = self.wv(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
 
-        q = self.rope.apply_rope(q, cos_freqs, sin_freqs)
-        k = self.rope.apply_rope(k, cos_freqs, sin_freqs)
-
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
+        positions = torch.arange(seq_len, device=x.device)
+        q = self.rope.apply_rope(q, positions)
+        k = self.rope.apply_rope(k, positions)
 
         present_kv = (k, v)
 
-        scores = torch.matmul(q, k.transpose(-2, -1)) / (self.d_k ** 0.5)
-        causal_mask = self.causal_mask[:seq_len, :seq_len]
-        scores = scores + causal_mask
+        causal_mask = self.causal_mask[:seq_len, :seq_len].view(1, 1, seq_len, seq_len)
+        out = functional.scaled_dot_product_attention(q, k, v, attn_mask=causal_mask)
 
-        attn_w = functional.softmax(scores, dim=-1)
-        out = torch.matmul(attn_w, v).transpose(1, 2).contiguous()
-        out = out.view(batch_size, seq_len, self.d_model)
-
+        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
         return self.wo(out), present_kv
 
     def forward_with_cache(self, x, past_kv, cache_len):
         batch_size, seq_len, _ = x.shape
+        max_gen_len = past_kv[0].size(2)
 
-        q = self.wq(x).view(batch_size, seq_len, self.num_heads, self.d_k)
-        k = self.wk(x).view(batch_size, seq_len, self.num_heads, self.d_k)
-        v = self.wv(x).view(batch_size, seq_len, self.num_heads, self.d_k)
+        assert cache_len + seq_len <= self.max_seq_len, (
+            f"RoPE overflow: cache_len({cache_len}) + seq_len({seq_len}) "
+            f"> max_seq_len({self.max_seq_len})"
+        )
+        assert cache_len + seq_len <= max_gen_len, (
+            f"KV cache overflow: cache_len({cache_len}) + seq_len({seq_len}) "
+            f"> max_gen_len({max_gen_len})"
+        )
 
-        cos_full, sin_full = self.rope(cache_len + seq_len)
-        cos_new = cos_full[:, cache_len:cache_len + seq_len, :].view(1, seq_len, 1, self.d_k)
-        sin_new = sin_full[:, cache_len:cache_len + seq_len, :].view(1, seq_len, 1, self.d_k)
+        q = self.wq(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        k = self.wk(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        v = self.wv(x).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
 
-        q = self.rope.apply_rope(q, cos_new, sin_new)
-        k = self.rope.apply_rope(k, cos_new, sin_new)
-
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
+        positions = torch.arange(cache_len, cache_len + seq_len, device=x.device)
+        q = self.rope.apply_rope(q, positions)
+        k = self.rope.apply_rope(k, positions)
 
         past_kv[0][:batch_size, :, cache_len:cache_len + seq_len, :] = k
         past_kv[1][:batch_size, :, cache_len:cache_len + seq_len, :] = v
@@ -168,14 +131,28 @@ class MultiHeadAttention(nn.Module):
         k_full = past_kv[0][:batch_size, :, :cache_len + seq_len, :]
         v_full = past_kv[1][:batch_size, :, :cache_len + seq_len, :]
 
-        scores = torch.matmul(q, k_full.transpose(-2, -1)) / (self.d_k ** 0.5)
-        attn_w = functional.softmax(scores, dim=-1)
+        seq_total = cache_len + seq_len
+        attn_mask = self.causal_mask[:seq_total, :seq_total]
+        attn_mask = attn_mask[cache_len:cache_len + seq_len, :].view(1, 1, seq_len, seq_total)
 
-        out = torch.matmul(attn_w, v_full).transpose(1, 2).contiguous()
-        out = out.view(batch_size, seq_len, self.d_model)
+        out = functional.scaled_dot_product_attention(q, k_full, v_full, attn_mask=attn_mask)
+        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
 
         return self.wo(out)
-    
+
+
+class SwiGLU(nn.Module):
+    """FFN với SwiGLU activation: SwiGLU(x) = (xW + b) * SiLU(xV + c)"""
+    def __init__(self, d_model, ff_dim):
+        super().__init__()
+        self.gate_proj = nn.Linear(d_model, ff_dim)
+        self.up_proj   = nn.Linear(d_model, ff_dim)
+        self.down_proj = nn.Linear(ff_dim,  d_model)
+
+    def forward(self, x):
+        return self.down_proj(self.up_proj(x) * functional.silu(self.gate_proj(x)))
+
+
 class DecoderBlock(nn.Module):
     def __init__(self, d_model, num_heads, ff_dim, max_seq_len, dropout):
         super().__init__()
@@ -187,41 +164,37 @@ class DecoderBlock(nn.Module):
 
         self.mha = MultiHeadAttention(d_model, num_heads, max_seq_len, dropout)
 
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, ff_dim),
-            nn.ReLU(),
-            nn.Linear(ff_dim, d_model),
-        )
+        self.ffn = SwiGLU(d_model, ff_dim)
 
-        self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
-        self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
+        self.layernorm1 = nn.RMSNorm(d_model, eps=1e-6)
+        self.layernorm2 = nn.RMSNorm(d_model, eps=1e-6)
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
     def forward(self, x, pad_mask=None):
-        attn_output = self.mha(x, pad_mask=pad_mask)
+        attn_output = self.mha(self.layernorm1(x), pad_mask=pad_mask)
         attn_output = self.dropout1(attn_output)
-        out1 = self.layernorm1(x + attn_output)
+        out1 = x + attn_output
 
-        ffn_output = self.ffn(out1)
+        ffn_output = self.ffn(self.layernorm2(out1))
         ffn_output = self.dropout2(ffn_output)
-        return self.layernorm2(out1 + ffn_output)
+        return out1 + ffn_output
 
     def prefill(self, x):
-        attn_out, present_kv = self.mha.prefill(x)
+        attn_out, present_kv = self.mha.prefill(self.layernorm1(x))
         attn_out = self.dropout1(attn_out)
-        out1 = self.layernorm1(x + attn_out)
-        ffn_out = self.ffn(out1)
+        out1 = x + attn_out
+        ffn_out = self.ffn(self.layernorm2(out1))
         ffn_out = self.dropout2(ffn_out)
-        return self.layernorm2(out1 + ffn_out), present_kv
+        return out1 + ffn_out, present_kv
 
     def forward_with_cache(self, x, past_kv, cache_len):
-        attn_out = self.mha.forward_with_cache(x, past_kv, cache_len)
+        attn_out = self.mha.forward_with_cache(self.layernorm1(x), past_kv, cache_len)
         attn_out = self.dropout1(attn_out)
-        out1 = self.layernorm1(x + attn_out)
-        ffn_out = self.ffn(out1)
+        out1 = x + attn_out
+        ffn_out = self.ffn(self.layernorm2(out1))
         ffn_out = self.dropout2(ffn_out)
-        return self.layernorm2(out1 + ffn_out)
+        return out1 + ffn_out
 
     def get_config(self):
         config = super().get_config()
@@ -247,24 +220,32 @@ class TransformerModel(nn.Module):
 
         self.token_embedding = nn.Embedding(vocab_size, d_model)
 
+        assert d_model % num_heads == 0, f"d_model ({d_model}) phải chia hết cho num_heads ({num_heads})"
+
         self.decoder_blocks = nn.ModuleList([
             DecoderBlock(d_model, num_heads, ff_dim, max_seq_len, dropout)
             for _ in range(num_layers)
         ])
 
         self.dropout_layer = nn.Dropout(dropout)
-        self.final_layer = nn.Linear(d_model, vocab_size)
+        self.final_norm = nn.RMSNorm(d_model, eps=1e-6)
+        self.final_layer = nn.Linear(d_model, vocab_size, bias=False)
+
+        nn.init.normal_(self.token_embedding.weight, mean=0.0, std=d_model ** -0.5)
+        self.final_layer.weight = self.token_embedding.weight
+
+        self.embed_scale = d_model ** 0.5
 
     def forward(self, inputs, attention_mask=None):
-        pad_mask = (inputs != 0).float() if attention_mask is None else attention_mask
+        pad_mask = (inputs != 0) if attention_mask is None else attention_mask.bool()
 
-        x = self.token_embedding(inputs)
+        x = self.token_embedding(inputs) * self.embed_scale
         x = self.dropout_layer(x)
 
         for block in self.decoder_blocks:
             x = block(x, pad_mask=pad_mask)
 
-        return self.final_layer(x)
+        return self.final_layer(self.final_norm(x))
 
     def forward_hidden(self, inputs, attention_mask=None):
         """
@@ -273,41 +254,71 @@ class TransformerModel(nn.Module):
         mỗi phần tử là 1 vector d_model chiều mô tả mối quan hệ, ngữ nghĩa của token đó ở trong câu
         """
         if attention_mask is None:
-            pad_mask = (inputs != 0).float()
+            pad_mask = (inputs != 0)
         else:
-            pad_mask = attention_mask
+            pad_mask = attention_mask.bool()
         
-        x = self.token_embedding(inputs)
+        x = self.token_embedding(inputs) * self.embed_scale
         x = self.dropout_layer(x)
         
         for block in self.decoder_blocks:
             x = block(x, pad_mask=pad_mask)
-        return x
+        return self.final_norm(x)
 
-    def prefill(self, input_ids):
-        x = self.token_embedding(input_ids)
+    def init_cache(self, batch_size, max_gen_len, device):
+        """
+        Preallocate KV cache buffer cho toàn bộ generation loop.
+
+        Workflow chuẩn:
+            cache = model.init_cache(batch_size, max_gen_len, device)
+            logits, cache = model.prefill(input_ids, cache)
+            cache_len = input_ids.size(1)
+            for _ in range(max_new_tokens):
+                logits, cache = model.decode_step(next_token, cache, cache_len)
+                cache_len += 1
+        """
+        d_k = self.d_model // self.num_heads
+        cache = []
+        for _ in self.decoder_blocks:
+            # torch.empty: không zero-init → nhanh hơn, các vị trí chưa write không bao giờ được đọc
+            k_buf = torch.empty(batch_size, self.num_heads, max_gen_len, d_k, device=device)
+            v_buf = torch.empty_like(k_buf)
+            cache.append((k_buf, v_buf))
+        return cache
+
+    def prefill(self, input_ids, kv_cache=None):
+        x = self.token_embedding(input_ids) * self.embed_scale
         x = self.dropout_layer(x)
 
-        kv_cache = []
-        for block in self.decoder_blocks:
+        seq_len = input_ids.size(1)
+        new_cache = []
+        for i, block in enumerate(self.decoder_blocks):
             x, present_kv = block.prefill(x)
-            kv_cache.append(present_kv)
+            if kv_cache is not None:
+                kv_cache[i][0][:, :, :seq_len, :] = present_kv[0]
+                kv_cache[i][1][:, :, :seq_len, :] = present_kv[1]
+                new_cache.append(kv_cache[i])
+            else:
+                new_cache.append(present_kv)
 
-        first_logits = self.final_layer(x)[:, -1, :]
-        return first_logits, kv_cache
+        first_logits = self.final_layer(self.final_norm(x))[:, -1, :]
+        return first_logits, new_cache
 
-    def decode_step(self, token_id, kv_cache):
-        x = self.token_embedding(
-            torch.tensor([[token_id]], dtype=torch.long, device=self.final_layer.weight.device)
-        )
+    def decode_step(self, token_ids, kv_cache, cache_len):
+        """
+        token_ids: LongTensor [B] hoặc scalar int — token mới nhất của mỗi sequence trong batch
+        """
+        if not isinstance(token_ids, torch.Tensor):
+            token_ids = torch.tensor([token_ids], dtype=torch.long, device=self.final_layer.weight.device)
+        token_ids = token_ids.view(-1, 1)
 
-        new_kv_cache = []
+        x = self.token_embedding(token_ids) * self.embed_scale
+
         for block, past_kv in zip(self.decoder_blocks, kv_cache):
-            x, present_kv = block.forward_with_cache(x, past_kv)
-            new_kv_cache.append(present_kv)
+            x = block.forward_with_cache(x, past_kv, cache_len)
 
-        logits = self.final_layer(x)[:, 0, :]
-        return logits, new_kv_cache
+        logits = self.final_layer(self.final_norm(x))[:, 0, :]
+        return logits, kv_cache
 
     def get_config(self):
         config = super().get_config()

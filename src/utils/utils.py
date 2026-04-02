@@ -1,4 +1,3 @@
-import textwrap
 import torch
 from pathlib import Path
 
@@ -47,7 +46,7 @@ def load_checkpoint(path: Path, model, optimizer, scheduler, scaler, device):
     optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     scheduler.load_state_dict(ckpt["scheduler_state_dict"])
     scaler.load_state_dict(ckpt["scaler_state_dict"])
-    start_epoch = ckpt["epoch"] + 1          # resume from NEXT epoch
+    start_epoch = ckpt["epoch"] + 1
     global_step = ckpt["global_step"]
     best_val_loss = ckpt["best_val_loss"]
     log_progress(f"Resumed from checkpoint: epoch {ckpt['epoch']+1}, step {global_step}, best_val_loss {best_val_loss:.5f}")
