@@ -65,31 +65,20 @@ def forward_init(model, input_ids, max_beam_size, max_new_tokens, device):
     prompt_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
 
     with torch.inference_mode():
-        x = model.token_embedding(prompt_tensor)
-        x = model.dropout_layer(x)
+        first_logits, present_cache = model.prefill(prompt_tensor, kv_cache=None)
+        for i, (k, v) in enumerate(present_cache):
+            kv_buffers[i][0][:, :, :prompt_len, :].copy_(k.expand(max_beam_size, -1, -1, -1))
+            kv_buffers[i][1][:, :, :prompt_len, :].copy_(v.expand(max_beam_size, -1, -1, -1))
 
-        for i, block in enumerate(model.decoder_blocks):
-            x_out, present_kv = block.mha.prefill(x)
-            kv_buffers[i][0][:, :, :prompt_len, :].copy_(present_kv[0].expand(max_beam_size, -1, -1, -1))
-            kv_buffers[i][1][:, :, :prompt_len, :].copy_(present_kv[1].expand(max_beam_size, -1, -1, -1))
-
-            attn_out = block.dropout1(x_out)
-            out1     = block.layernorm1(x + attn_out)
-            ffn_out  = block.ffn(out1)
-            ffn_out  = block.dropout2(ffn_out)
-            x        = block.layernorm2(out1 + ffn_out)
-
-        logits = model.final_layer(x)[0, -1, :]
-
-    return logits, kv_buffers, prompt_len
+    return first_logits[0], kv_buffers, prompt_len
 
 def forward_step(model, last_tokens, kv_buffers, cache_len):
     with torch.inference_mode():
-        x = model.token_embedding(last_tokens)
+        x = model.token_embedding(last_tokens) * model.embed_scale
         x = model.dropout_layer(x)
         for i, block in enumerate(model.decoder_blocks):
             x = block.forward_with_cache(x, kv_buffers[i], cache_len)
-        logits = model.final_layer(x)[:, 0, :]
+        logits = model.final_layer(model.final_norm(x))[:, 0, :]
     return logits
 
 # ================= BEAM CORE =================
