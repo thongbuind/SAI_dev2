@@ -77,7 +77,7 @@ def forward_step(model, last_tokens, kv_buffers, cache_len):
         x = model.token_embedding(last_tokens) * model.embed_scale
         x = model.dropout_layer(x)
         for i, block in enumerate(model.decoder_blocks):
-            x = block.forward_with_cache(x, kv_buffers[i], cache_len)
+            x = block.forward(x, kv_buffers[i], cache_len)
         logits = model.final_layer(model.final_norm(x))[:, 0, :]
     return logits
 
